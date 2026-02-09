@@ -38,6 +38,7 @@
         const TAG = '[Receiver]';
         const video = document.getElementById('media');
         let hls = null;
+        let customPlayback = false; // true when WE manage playback (HLS)
 
         const context = cast.framework.CastReceiverContext.getInstance();
         const playerManager = context.getPlayerManager();
@@ -52,16 +53,13 @@
                 hls.destroy();
                 hls = null;
             }
-            video.removeAttribute('src');
-            video.load();
+            customPlayback = false;
         }
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Intercept LOAD — we handle ALL content ourselves.
-        // HLS → hls.js, everything else → video.src directly.
-        // Chrome's <video> element on Chromecast can play
-        // MKV, MP4, TS etc. with H.264/AAC codecs.
-        // We NEVER let CAF handle it natively.
+        // Intercept LOAD
+        // HLS → hls.js (custom, return null)
+        // Non-HLS → CAF native (return request, creates media session)
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.LOAD,
@@ -78,11 +76,12 @@
                     contentType.includes('mpegurl')
                 );
 
-                return new Promise((resolve) => {
-                    if (isHls && Hls.isSupported()) {
-                        // ─── HLS via hls.js ───
-                        console.log(TAG, '🎬 Using hls.js for HLS');
+                if (isHls && Hls.isSupported()) {
+                    // ─── HLS via hls.js (custom playback) ───
+                    console.log(TAG, '🎬 Using hls.js for HLS');
+                    customPlayback = true;
 
+                    return new Promise((resolve) => {
                         hls = new Hls({
                             debug: false,
                             enableWorker: true,
@@ -122,60 +121,81 @@
 
                         hls.loadSource(url);
                         hls.attachMedia(video);
+                        resolve(null); // Prevent CAF from loading
+                    });
 
-                    } else {
-                        // ─── Direct playback via video.src ───
-                        // Chrome's video element handles MP4, MKV (H.264), TS, etc.
-                        console.log(TAG, '📺 Direct playback via video.src');
-                        video.src = url;
-                        video.play().catch(err =>
-                            console.warn(TAG, '⚠️ Autoplay:', err.message)
-                        );
+                } else {
+                    // ─── Non-HLS: let CAF handle natively ───
+                    // CAF creates a media session → sender controls work
+                    // Override unsupported MIME types to video/mp4
+                    console.log(TAG, '📺 CAF native playback');
+
+                    if (!contentType ||
+                        contentType.includes('matroska') ||
+                        contentType.includes('msvideo') ||
+                        contentType.includes('quicktime')) {
+                        request.media.contentType = 'video/mp4';
+                        console.log(TAG, '🔀 Content type → video/mp4');
                     }
 
-                    // Return null for ALL cases — we always handle playback ourselves
-                    resolve(null);
-                });
+                    // Ensure contentUrl is set (some versions of the SDK need it)
+                    if (!request.media.contentUrl && request.media.contentId) {
+                        request.media.contentUrl = request.media.contentId;
+                    }
+
+                    return request; // CAF handles it, media session created
+                }
             }
         );
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Handle controls from sender app
-        // We manage playback, so intercept all commands
+        // Handle controls — only intercept when custom (HLS) playback
+        // For non-HLS, CAF handles controls natively
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.PAUSE,
-            (request) => { video.pause(); return null; }
+            (request) => {
+                if (customPlayback) { video.pause(); return null; }
+                return request;
+            }
         );
 
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.PLAY,
-            (request) => { video.play(); return null; }
+            (request) => {
+                if (customPlayback) { video.play(); return null; }
+                return request;
+            }
         );
 
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.SEEK,
             (request) => {
-                if (request.currentTime !== undefined) {
+                if (customPlayback && request.currentTime !== undefined) {
                     video.currentTime = request.currentTime;
+                    return null;
                 }
-                return null;
+                return request;
             }
         );
 
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.STOP,
-            (request) => { cleanup(); return null; }
+            (request) => {
+                if (customPlayback) { cleanup(); return null; }
+                return request;
+            }
         );
 
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.SET_VOLUME,
             (request) => {
-                if (request.volume) {
+                if (customPlayback && request.volume) {
                     if (request.volume.level !== undefined) video.volume = request.volume.level;
                     if (request.volume.muted !== undefined) video.muted = request.volume.muted;
+                    return null;
                 }
-                return null;
+                return request;
             }
         );
 
