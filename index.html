@@ -38,7 +38,6 @@
         const TAG = '[Receiver]';
         const video = document.getElementById('media');
         let hls = null;
-        let customPlayback = false; // true when WE manage playback (not CAF)
 
         const context = cast.framework.CastReceiverContext.getInstance();
         const playerManager = context.getPlayerManager();
@@ -53,12 +52,16 @@
                 hls.destroy();
                 hls = null;
             }
-            customPlayback = false;
+            video.removeAttribute('src');
+            video.load();
         }
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Intercept LOAD — only custom-handle HLS
-        // Let CAF handle everything else natively
+        // Intercept LOAD — we handle ALL content ourselves.
+        // HLS → hls.js, everything else → video.src directly.
+        // Chrome's <video> element on Chromecast can play
+        // MKV, MP4, TS etc. with H.264/AAC codecs.
+        // We NEVER let CAF handle it natively.
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.LOAD,
@@ -75,12 +78,11 @@
                     contentType.includes('mpegurl')
                 );
 
-                if (isHls && Hls.isSupported()) {
-                    // ─── HLS via hls.js ───
-                    console.log(TAG, '🎬 Using hls.js for HLS');
-                    customPlayback = true;
+                return new Promise((resolve) => {
+                    if (isHls && Hls.isSupported()) {
+                        // ─── HLS via hls.js ───
+                        console.log(TAG, '🎬 Using hls.js for HLS');
 
-                    return new Promise((resolve) => {
                         hls = new Hls({
                             debug: false,
                             enableWorker: true,
@@ -96,7 +98,7 @@
                         });
 
                         hls.on(Hls.Events.MANIFEST_PARSED, (e, data) => {
-                            console.log(TAG, '✅ Manifest parsed, levels:', data.levels.length);
+                            console.log(TAG, '✅ HLS manifest parsed, levels:', data.levels.length);
                             video.play().catch(err =>
                                 console.warn(TAG, '⚠️ Autoplay:', err.message)
                             );
@@ -120,77 +122,60 @@
 
                         hls.loadSource(url);
                         hls.attachMedia(video);
-                        resolve(null); // Prevent CAF default loading
-                    });
 
-                } else {
-                    // ─── Let CAF handle natively (MP4, TS, MKV, etc.) ───
-                    console.log(TAG, '📺 Letting CAF handle natively:', contentType || '(no type)');
-
-                    // Ensure contentType is set for CAF —
-                    // override unsupported container types to video/mp4
-                    if (!contentType ||
-                        contentType.includes('matroska') ||
-                        contentType.includes('msvideo') ||
-                        contentType.includes('quicktime')) {
-                        console.log(TAG, '🔀 Setting content type to video/mp4 for CAF');
-                        request.media.contentType = 'video/mp4';
+                    } else {
+                        // ─── Direct playback via video.src ───
+                        // Chrome's video element handles MP4, MKV (H.264), TS, etc.
+                        console.log(TAG, '📺 Direct playback via video.src');
+                        video.src = url;
+                        video.play().catch(err =>
+                            console.warn(TAG, '⚠️ Autoplay:', err.message)
+                        );
                     }
 
-                    // Let CAF handle it — return the request as-is
-                    return request;
-                }
+                    // Return null for ALL cases — we always handle playback ourselves
+                    resolve(null);
+                });
             }
         );
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         // Handle controls from sender app
-        // Only intercept when using custom HLS playback
+        // We manage playback, so intercept all commands
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.PAUSE,
-            (request) => {
-                if (customPlayback) { video.pause(); return null; }
-                return request;
-            }
+            (request) => { video.pause(); return null; }
         );
 
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.PLAY,
-            (request) => {
-                if (customPlayback) { video.play(); return null; }
-                return request;
-            }
+            (request) => { video.play(); return null; }
         );
 
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.SEEK,
             (request) => {
-                if (customPlayback && request.currentTime !== undefined) {
+                if (request.currentTime !== undefined) {
                     video.currentTime = request.currentTime;
-                    return null;
                 }
-                return request;
+                return null;
             }
         );
 
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.STOP,
-            (request) => {
-                if (customPlayback) { cleanup(); return null; }
-                return request;
-            }
+            (request) => { cleanup(); return null; }
         );
 
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.SET_VOLUME,
             (request) => {
-                if (customPlayback && request.volume) {
+                if (request.volume) {
                     if (request.volume.level !== undefined) video.volume = request.volume.level;
                     if (request.volume.muted !== undefined) video.muted = request.volume.muted;
-                    return null;
                 }
-                return request;
+                return null;
             }
         );
 
@@ -199,9 +184,13 @@
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         video.addEventListener('playing', () => console.log(TAG, '🎉 PLAYING'));
         video.addEventListener('pause', () => console.log(TAG, '⏸️ PAUSED'));
-        video.addEventListener('error', () => console.error(TAG, '❌ Error:', video.error?.message));
+        video.addEventListener('error', () => {
+            const err = video.error;
+            console.error(TAG, '❌ Video error:', err ? `code=${err.code} msg=${err.message}` : 'unknown');
+        });
         video.addEventListener('waiting', () => console.log(TAG, '⏳ BUFFERING'));
         video.addEventListener('loadeddata', () => console.log(TAG, '📦 Data loaded'));
+        video.addEventListener('canplay', () => console.log(TAG, '▶️ Can play'));
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         // Start
