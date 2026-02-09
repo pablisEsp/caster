@@ -12,19 +12,42 @@
             overflow: hidden;
         }
 
-        video {
+        cast-media-player {
+            width: 100vw;
+            height: 100vh;
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        /* Hide default CAF splash/watermark during custom HLS playback */
+        .custom-playback cast-media-player {
+            visibility: hidden;
+        }
+
+        video#hlsVideo {
             width: 100vw;
             height: 100vh;
             position: absolute;
             top: 0;
             left: 0;
             background: #000;
+            z-index: 10;
+            display: none;
+        }
+
+        .custom-playback video#hlsVideo {
+            display: block;
         }
     </style>
 </head>
 
 <body>
-    <video id="media" autoplay></video>
+    <!-- CAF's built-in media player element — handles non-HLS natively -->
+    <cast-media-player></cast-media-player>
+
+    <!-- Separate video element for custom HLS playback via hls.js -->
+    <video id="hlsVideo" autoplay></video>
 
     <!-- hls.js for HLS streams -->
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
@@ -36,9 +59,9 @@
         'use strict';
 
         const TAG = '[Receiver]';
-        const video = document.getElementById('media');
+        const hlsVideo = document.getElementById('hlsVideo');
         let hls = null;
-        let customPlayback = false; // true when WE manage playback (not CAF)
+        let customPlayback = false; // true when WE manage playback (HLS via hls.js)
 
         const context = cast.framework.CastReceiverContext.getInstance();
         const playerManager = context.getPlayerManager();
@@ -46,20 +69,22 @@
         console.log(TAG, '🚀 Custom IPTV receiver starting...');
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Helper: clean up current playback
+        // Helper: clean up HLS playback
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         function cleanup() {
             if (hls) {
                 hls.destroy();
                 hls = null;
             }
-            video.removeAttribute('src');
-            video.load();
             customPlayback = false;
+            document.body.classList.remove('custom-playback');
+            hlsVideo.removeAttribute('src');
+            hlsVideo.load();
         }
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Intercept LOAD — route to hls.js or native
+        // Intercept LOAD — only custom-handle HLS
+        // Let CAF handle everything else natively
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.LOAD,
@@ -80,6 +105,7 @@
                     // ─── HLS via hls.js ───
                     console.log(TAG, '🎬 Using hls.js for HLS');
                     customPlayback = true;
+                    document.body.classList.add('custom-playback');
 
                     return new Promise((resolve) => {
                         hls = new Hls({
@@ -98,7 +124,7 @@
 
                         hls.on(Hls.Events.MANIFEST_PARSED, (e, data) => {
                             console.log(TAG, '✅ Manifest parsed, levels:', data.levels.length);
-                            video.play().catch(err =>
+                            hlsVideo.play().catch(err =>
                                 console.warn(TAG, '⚠️ Autoplay:', err.message)
                             );
                         });
@@ -120,35 +146,38 @@
                         });
 
                         hls.loadSource(url);
-                        hls.attachMedia(video);
+                        hls.attachMedia(hlsVideo);
                         resolve(null); // Prevent CAF default loading
                     });
 
                 } else {
-                    // ─── Direct video (MP4, TS, etc.) ───
-                    console.log(TAG, '📺 Using direct video playback for:', url);
-                    customPlayback = true;
+                    // ─── Let CAF handle natively (MP4, TS, MKV, etc.) ───
+                    console.log(TAG, '📺 Letting CAF handle natively:', contentType);
 
-                    video.src = url;
-                    video.load();
-                    video.play().then(() => {
-                        console.log(TAG, '▶️ Direct playback started');
-                    }).catch(err => {
-                        console.error(TAG, '❌ Direct play failed:', err.message);
-                    });
+                    // For non-standard containers, override content type
+                    // so CAF tries its best with its media pipeline
+                    if (contentType.includes('matroska') ||
+                        contentType.includes('msvideo') ||
+                        contentType.includes('quicktime') ||
+                        contentType === '') {
+                        console.log(TAG, '🔀 Overriding content type to video/mp4 for CAF');
+                        request.media.contentType = 'video/mp4';
+                    }
 
-                    return null; // Prevent CAF default loading
+                    // Let CAF handle it — return the request as-is
+                    return request;
                 }
             }
         );
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         // Handle controls from sender app
+        // Only intercept when using custom HLS playback
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.PAUSE,
             (request) => {
-                if (customPlayback) { video.pause(); return null; }
+                if (customPlayback) { hlsVideo.pause(); return null; }
                 return request;
             }
         );
@@ -156,7 +185,7 @@
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.PLAY,
             (request) => {
-                if (customPlayback) { video.play(); return null; }
+                if (customPlayback) { hlsVideo.play(); return null; }
                 return request;
             }
         );
@@ -165,7 +194,7 @@
             cast.framework.messages.MessageType.SEEK,
             (request) => {
                 if (customPlayback && request.currentTime !== undefined) {
-                    video.currentTime = request.currentTime;
+                    hlsVideo.currentTime = request.currentTime;
                     return null;
                 }
                 return request;
@@ -184,8 +213,8 @@
             cast.framework.messages.MessageType.SET_VOLUME,
             (request) => {
                 if (customPlayback && request.volume) {
-                    if (request.volume.level !== undefined) video.volume = request.volume.level;
-                    if (request.volume.muted !== undefined) video.muted = request.volume.muted;
+                    if (request.volume.level !== undefined) hlsVideo.volume = request.volume.level;
+                    if (request.volume.muted !== undefined) hlsVideo.muted = request.volume.muted;
                     return null;
                 }
                 return request;
@@ -195,18 +224,19 @@
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         // Debug logging
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        video.addEventListener('playing', () => console.log(TAG, '🎉 PLAYING'));
-        video.addEventListener('pause', () => console.log(TAG, '⏸️ PAUSED'));
-        video.addEventListener('error', () => console.error(TAG, '❌ Error:', video.error?.message));
-        video.addEventListener('waiting', () => console.log(TAG, '⏳ BUFFERING'));
-        video.addEventListener('loadeddata', () => console.log(TAG, '📦 Data loaded'));
+        hlsVideo.addEventListener('playing', () => console.log(TAG, '🎉 PLAYING'));
+        hlsVideo.addEventListener('pause', () => console.log(TAG, '⏸️ PAUSED'));
+        hlsVideo.addEventListener('error', () => console.error(TAG, '❌ Error:', hlsVideo.error?.message));
+        hlsVideo.addEventListener('waiting', () => console.log(TAG, '⏳ BUFFERING'));
+        hlsVideo.addEventListener('loadeddata', () => console.log(TAG, '📦 Data loaded'));
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         // Start
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         const options = new cast.framework.CastReceiverOptions();
         options.disableIdleTimeout = true;
-        options.mediaElement = video;
+        // Do NOT set options.mediaElement — let CAF use its own <cast-media-player>
+        // for non-HLS content. We use a separate #hlsVideo element for HLS.
 
         context.start(options);
         console.log(TAG, '✅ Receiver started');
