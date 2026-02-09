@@ -38,7 +38,6 @@
         const TAG = '[Receiver]';
         const video = document.getElementById('media');
         let hls = null;
-        let customPlayback = false; // true when WE manage playback (HLS)
 
         const context = cast.framework.CastReceiverContext.getInstance();
         const playerManager = context.getPlayerManager();
@@ -46,28 +45,27 @@
         console.log(TAG, '🚀 Custom IPTV receiver starting...');
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Helper: clean up HLS playback
+        // Helper: clean up
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         function cleanup() {
-            if (hls) {
-                hls.destroy();
-                hls = null;
-            }
-            customPlayback = false;
+            if (hls) { hls.destroy(); hls = null; }
+            video.removeAttribute('src');
+            video.load();
         }
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Intercept LOAD
-        // HLS → hls.js (custom, return null)
-        // Non-HLS → CAF native (return request, creates media session)
+        // Intercept LOAD — we handle ALL content ourselves.
+        // HLS → hls.js, everything else → video.src.
+        // Start position is read from request.currentTime.
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.LOAD,
             (request) => {
                 const url = request.media.contentUrl || request.media.contentId;
                 const contentType = (request.media.contentType || '').toLowerCase();
+                const startTime = request.currentTime || 0;
                 console.log(TAG, '📥 LOAD:', url);
-                console.log(TAG, '📦 type:', contentType);
+                console.log(TAG, '📦 type:', contentType, '⏱️ start:', startTime);
 
                 cleanup();
 
@@ -76,12 +74,11 @@
                     contentType.includes('mpegurl')
                 );
 
-                if (isHls && Hls.isSupported()) {
-                    // ─── HLS via hls.js (custom playback) ───
-                    console.log(TAG, '🎬 Using hls.js for HLS');
-                    customPlayback = true;
+                return new Promise((resolve) => {
+                    if (isHls && Hls.isSupported()) {
+                        // ─── HLS via hls.js ───
+                        console.log(TAG, '🎬 Using hls.js for HLS');
 
-                    return new Promise((resolve) => {
                         hls = new Hls({
                             debug: false,
                             enableWorker: true,
@@ -96,8 +93,12 @@
                             fragLoadingRetryDelay: 1000,
                         });
 
-                        hls.on(Hls.Events.MANIFEST_PARSED, (e, data) => {
-                            console.log(TAG, '✅ HLS manifest parsed, levels:', data.levels.length);
+                        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                            console.log(TAG, '✅ HLS manifest parsed');
+                            if (startTime > 0) {
+                                video.currentTime = startTime;
+                                console.log(TAG, '⏩ Seeking to', startTime);
+                            }
                             video.play().catch(err =>
                                 console.warn(TAG, '⚠️ Autoplay:', err.message)
                             );
@@ -106,96 +107,34 @@
                         hls.on(Hls.Events.ERROR, (e, data) => {
                             console.error(TAG, '❌ HLS error:', data.type, data.details);
                             if (data.fatal) {
-                                if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-                                    console.log(TAG, '🔄 Retrying...');
-                                    hls.startLoad();
-                                } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-                                    console.log(TAG, '🔄 Recovering media...');
-                                    hls.recoverMediaError();
-                                } else {
-                                    console.error(TAG, '💀 Fatal error');
-                                    cleanup();
-                                }
+                                if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+                                else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+                                else cleanup();
                             }
                         });
 
                         hls.loadSource(url);
                         hls.attachMedia(video);
-                        resolve(null); // Prevent CAF from loading
-                    });
 
-                } else {
-                    // ─── Non-HLS: let CAF handle natively ───
-                    // CAF creates a media session → sender controls work
-                    // Override unsupported MIME types to video/mp4
-                    console.log(TAG, '📺 CAF native playback');
+                    } else {
+                        // ─── Direct playback via video.src ───
+                        console.log(TAG, '📺 Direct playback');
+                        video.src = url;
 
-                    if (!contentType ||
-                        contentType.includes('matroska') ||
-                        contentType.includes('msvideo') ||
-                        contentType.includes('quicktime')) {
-                        request.media.contentType = 'video/mp4';
-                        console.log(TAG, '🔀 Content type → video/mp4');
+                        if (startTime > 0) {
+                            video.addEventListener('loadedmetadata', () => {
+                                video.currentTime = startTime;
+                                console.log(TAG, '⏩ Seeking to', startTime);
+                            }, { once: true });
+                        }
+
+                        video.play().catch(err =>
+                            console.warn(TAG, '⚠️ Autoplay:', err.message)
+                        );
                     }
 
-                    // Ensure contentUrl is set (some versions of the SDK need it)
-                    if (!request.media.contentUrl && request.media.contentId) {
-                        request.media.contentUrl = request.media.contentId;
-                    }
-
-                    return request; // CAF handles it, media session created
-                }
-            }
-        );
-
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Handle controls — only intercept when custom (HLS) playback
-        // For non-HLS, CAF handles controls natively
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        playerManager.setMessageInterceptor(
-            cast.framework.messages.MessageType.PAUSE,
-            (request) => {
-                if (customPlayback) { video.pause(); return null; }
-                return request;
-            }
-        );
-
-        playerManager.setMessageInterceptor(
-            cast.framework.messages.MessageType.PLAY,
-            (request) => {
-                if (customPlayback) { video.play(); return null; }
-                return request;
-            }
-        );
-
-        playerManager.setMessageInterceptor(
-            cast.framework.messages.MessageType.SEEK,
-            (request) => {
-                if (customPlayback && request.currentTime !== undefined) {
-                    video.currentTime = request.currentTime;
-                    return null;
-                }
-                return request;
-            }
-        );
-
-        playerManager.setMessageInterceptor(
-            cast.framework.messages.MessageType.STOP,
-            (request) => {
-                if (customPlayback) { cleanup(); return null; }
-                return request;
-            }
-        );
-
-        playerManager.setMessageInterceptor(
-            cast.framework.messages.MessageType.SET_VOLUME,
-            (request) => {
-                if (customPlayback && request.volume) {
-                    if (request.volume.level !== undefined) video.volume = request.volume.level;
-                    if (request.volume.muted !== undefined) video.muted = request.volume.muted;
-                    return null;
-                }
-                return request;
+                    resolve(null);
+                });
             }
         );
 
@@ -209,7 +148,6 @@
             console.error(TAG, '❌ Video error:', err ? `code=${err.code} msg=${err.message}` : 'unknown');
         });
         video.addEventListener('waiting', () => console.log(TAG, '⏳ BUFFERING'));
-        video.addEventListener('loadeddata', () => console.log(TAG, '📦 Data loaded'));
         video.addEventListener('canplay', () => console.log(TAG, '▶️ Can play'));
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
