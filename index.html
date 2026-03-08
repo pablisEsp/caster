@@ -1,158 +1,130 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <title>IPTV Cast Receiver</title>
     <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background: #000;
-            overflow: hidden;
-        }
-
-        video {
-            width: 100vw;
-            height: 100vh;
-            position: absolute;
-            top: 0;
-            left: 0;
-            background: #000;
-        }
+        body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+        video { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; background: #000; }
     </style>
 </head>
-
 <body>
     <video id="media" autoplay></video>
-
-    <!-- hls.js for HLS streams -->
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
-
-    <!-- Google Cast Receiver SDK v3 -->
     <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
-
     <script>
         'use strict';
-
         const TAG = '[Receiver]';
         const video = document.getElementById('media');
         let hls = null;
+        let lastUrl = null;
 
         const context = cast.framework.CastReceiverContext.getInstance();
         const playerManager = context.getPlayerManager();
 
         console.log(TAG, '🚀 Custom IPTV receiver starting...');
 
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Helper: clean up
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        function cleanup() {
+        function cleanupHls() {
             if (hls) { hls.destroy(); hls = null; }
-            video.removeAttribute('src');
-            video.load();
         }
 
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Intercept LOAD — we handle ALL content ourselves.
-        // HLS → hls.js, everything else → video.src.
-        // Start position is read from request.currentTime.
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // LOAD interceptor — let CAF handle playback natively.
+        // Most Cast devices (including built-in) support HLS.
+        // We only modify the request, then RETURN IT so CAF manages state.
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.LOAD,
             (request) => {
+                cleanupHls();
                 const url = request.media.contentUrl || request.media.contentId;
                 const contentType = (request.media.contentType || '').toLowerCase();
-                const startTime = request.currentTime || 0;
                 console.log(TAG, '📥 LOAD:', url);
-                console.log(TAG, '📦 type:', contentType, '⏱️ start:', startTime);
+                console.log(TAG, '📦 type:', contentType);
 
-                cleanup();
+                lastUrl = url;
 
-                const isHls = url && (
-                    url.includes('.m3u8') ||
-                    contentType.includes('mpegurl')
-                );
+                // Ensure both contentUrl and contentId are set
+                if (url) {
+                    request.media.contentUrl = url;
+                    request.media.contentId = url;
+                }
 
-                return new Promise((resolve) => {
-                    if (isHls && Hls.isSupported()) {
-                        // ─── HLS via hls.js ───
-                        console.log(TAG, '🎬 Using hls.js for HLS');
+                // Ensure correct content type for HLS
+                if (url && url.includes('.m3u8') && !contentType.includes('mpegurl')) {
+                    request.media.contentType = 'application/x-mpegURL';
+                    console.log(TAG, '🔧 Fixed content type to HLS');
+                }
 
-                        hls = new Hls({
-                            debug: false,
-                            enableWorker: true,
-                            lowLatencyMode: false,
-                            backBufferLength: 30,
-                            maxBufferLength: 30,
-                            maxMaxBufferLength: 60,
-                            startLevel: -1,
-                            fragLoadingMaxRetry: 10,
-                            manifestLoadingMaxRetry: 6,
-                            levelLoadingMaxRetry: 6,
-                            fragLoadingRetryDelay: 1000,
-                        });
-
-                        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                            console.log(TAG, '✅ HLS manifest parsed');
-                            if (startTime > 0) {
-                                video.currentTime = startTime;
-                                console.log(TAG, '⏩ Seeking to', startTime);
-                            }
-                            video.play().catch(err =>
-                                console.warn(TAG, '⚠️ Autoplay:', err.message)
-                            );
-                        });
-
-                        hls.on(Hls.Events.ERROR, (e, data) => {
-                            console.error(TAG, '❌ HLS error:', data.type, data.details);
-                            if (data.fatal) {
-                                if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-                                else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-                                else cleanup();
-                            }
-                        });
-
-                        hls.loadSource(url);
-                        hls.attachMedia(video);
-
-                    } else {
-                        // ─── Direct playback via video.src ───
-                        console.log(TAG, '📺 Direct playback');
-                        video.src = url;
-
-                        if (startTime > 0) {
-                            video.addEventListener('loadedmetadata', () => {
-                                video.currentTime = startTime;
-                                console.log(TAG, '⏩ Seeking to', startTime);
-                            }, { once: true });
-                        }
-
-                        video.play().catch(err =>
-                            console.warn(TAG, '⚠️ Autoplay:', err.message)
-                        );
-                    }
-
-                    resolve(null);
-                });
+                // Let CAF handle it natively — this is the key fix!
+                console.log(TAG, '📺 Delegating to CAF native player');
+                return request;
             }
         );
 
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // ERROR handler — if CAF fails, fall back to hls.js
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        playerManager.addEventListener(
+            cast.framework.events.EventType.ERROR,
+            (event) => {
+                console.error(TAG, '❌ CAF error:', event.detailedErrorCode, event.reason);
+
+                // Only try hls.js fallback for HLS streams
+                if (lastUrl && lastUrl.includes('.m3u8') && Hls.isSupported()) {
+                    console.log(TAG, '🔄 Falling back to hls.js...');
+                    
+                    hls = new Hls({
+                        debug: false,
+                        enableWorker: true,
+                        lowLatencyMode: false,
+                        backBufferLength: 30,
+                        maxBufferLength: 30,
+                        maxMaxBufferLength: 60,
+                        startLevel: -1,
+                        fragLoadingMaxRetry: 10,
+                        manifestLoadingMaxRetry: 6,
+                        levelLoadingMaxRetry: 6,
+                        fragLoadingRetryDelay: 1000,
+                    });
+
+                    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                        console.log(TAG, '✅ hls.js manifest parsed');
+                        video.play().catch(err =>
+                            console.warn(TAG, '⚠️ Autoplay:', err.message)
+                        );
+                    });
+
+                    hls.on(Hls.Events.ERROR, (e, data) => {
+                        console.error(TAG, '❌ hls.js error:', data.type, data.details);
+                        if (data.fatal) {
+                            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+                            else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
+                            else cleanupHls();
+                        }
+                    });
+
+                    hls.loadSource(lastUrl);
+                    hls.attachMedia(video);
+                }
+            }
+        );
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         // Debug logging
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         video.addEventListener('playing', () => console.log(TAG, '🎉 PLAYING'));
-        video.addEventListener('pause', () => console.log(TAG, '⏸️ PAUSED'));
-        video.addEventListener('error', () => {
+        video.addEventListener('pause',   () => console.log(TAG, '⏸️ PAUSED'));
+        video.addEventListener('waiting', () => console.log(TAG, '⏳ BUFFERING'));
+        video.addEventListener('canplay', () => console.log(TAG, '▶️ Can play'));
+        video.addEventListener('error',   () => {
             const err = video.error;
             console.error(TAG, '❌ Video error:', err ? `code=${err.code} msg=${err.message}` : 'unknown');
         });
-        video.addEventListener('waiting', () => console.log(TAG, '⏳ BUFFERING'));
-        video.addEventListener('canplay', () => console.log(TAG, '▶️ Can play'));
 
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         // Start
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         const options = new cast.framework.CastReceiverOptions();
         options.disableIdleTimeout = true;
         options.mediaElement = video;
@@ -161,5 +133,4 @@
         console.log(TAG, '✅ Receiver started');
     </script>
 </body>
-
 </html>
