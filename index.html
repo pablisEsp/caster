@@ -56,8 +56,12 @@
         function log(msg) {
             console.log(TAG, msg);
             debugLines.push(new Date().toLocaleTimeString() + ' ' + msg);
-            if (debugLines.length > 20) debugLines.shift();
+            if (debugLines.length > 25) debugLines.shift();
             debugEl.innerHTML = debugLines.join('<br>');
+        }
+
+        function hideDebug() {
+            setTimeout(() => { debugEl.style.display = 'none'; }, 3000);
         }
 
         const context = cast.framework.CastReceiverContext.getInstance();
@@ -65,162 +69,154 @@
 
         log('🚀 Receiver starting...');
         log('📱 UA: ' + navigator.userAgent.substring(0, 60));
-        log('🔧 hls.js supported: ' + Hls.isSupported());
+        log('🔧 hls.js: ' + Hls.isSupported());
+        log('🔧 native HLS: ' + video.canPlayType('application/vnd.apple.mpegurl'));
+        log('🔧 native m3u8: ' + video.canPlayType('application/x-mpegURL'));
 
-        function cleanupHls() {
+        function cleanup() {
             if (hls) { hls.destroy(); hls = null; }
+            video.removeAttribute('src');
+            video.load();
         }
 
-        // ━━━━━━ LOAD interceptor ━━━━━━
-        // Strategy:
-        // 1. Try CAF native with original URL
-        // 2. On error → try hls.js (works if URL is HTTPS or same-origin)
-        // 3. On hls.js error → try CAF native with HTTP (downgrade HTTPS→HTTP)
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // LOAD interceptor — try multiple strategies
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.LOAD,
             (request) => {
-                cleanupHls();
-                let url = request.media.contentUrl || request.media.contentId;
+                const url = request.media.contentUrl || request.media.contentId;
                 const contentType = (request.media.contentType || '').toLowerCase();
-                log('📥 LOAD: ' + (url ? url.substring(0, 80) : 'null'));
+                const startTime = request.currentTime || 0;
+                log('📥 URL: ' + (url ? url.substring(0, 80) : 'null'));
                 log('📦 type: ' + contentType);
+                log('🔒 protocol: ' + (url ? url.split(':')[0] : '?'));
+
+                cleanup();
 
                 if (!url) {
-                    log('❌ No URL!');
+                    log('❌ No URL');
                     return request;
                 }
 
-                // Store original URL and HTTP version
-                request._originalUrl = url;
-                request._httpUrl = url.replace(/^https:\/\//, 'http://');
+                const isHls = url.includes('.m3u8') || contentType.includes('mpegurl');
+                const isHttp = url.startsWith('http://');
 
-                // Set both contentUrl and contentId
-                request.media.contentUrl = url;
-                request.media.contentId = url;
+                // Strategy selection:
+                // 1. HTTPS HLS → hls.js (best compatibility)
+                // 2. HTTP HLS → try native video.src, then hls.js, then CAF
+                // 3. Non-HLS → direct video.src
 
-                // Fix content type for HLS if needed
-                if (url.includes('.m3u8') && !contentType.includes('mpegurl')) {
-                    request.media.contentType = 'application/x-mpegURL';
-                    log('🔧 Fixed HLS content type');
-                }
-
-                log('📺 → CAF native player');
-                return request;
-            }
-        );
-
-        // ━━━━━━ Track load attempts to avoid infinite loops ━━━━━━
-        let errorCount = 0;
-        let lastErrorUrl = '';
-
-        // ━━━━━━ ERROR handler: multi-stage fallback ━━━━━━
-        playerManager.addEventListener(
-            cast.framework.events.EventType.ERROR,
-            (event) => {
-                const mediaInfo = playerManager.getMediaInformation();
-                const currentUrl = mediaInfo ? (mediaInfo.contentUrl || mediaInfo.contentId) : '';
-                log('❌ CAF error: ' + (event.detailedErrorCode || 'unknown'));
-
-                // Track errors per URL to avoid infinite retry
-                if (currentUrl !== lastErrorUrl) {
-                    errorCount = 0;
-                    lastErrorUrl = currentUrl;
-                }
-                errorCount++;
-
-                if (errorCount > 3) {
-                    log('💀 Too many errors, giving up');
-                    return;
-                }
-
-                const isHls = currentUrl && currentUrl.includes('.m3u8');
-
-                // Stage 1: Try hls.js (works for HTTPS streams)
-                if (errorCount === 1 && isHls && Hls.isSupported()) {
-                    log('🔄 Stage 1: hls.js fallback');
-                    tryHlsJs(currentUrl);
-                    return;
-                }
-
-                // Stage 2: Try CAF native with HTTP URL
-                if (errorCount === 2 && currentUrl.startsWith('https://')) {
-                    const httpUrl = currentUrl.replace(/^https:\/\//, 'http://');
-                    log('🔄 Stage 2: CAF native with HTTP');
-                    log('🔗 ' + httpUrl.substring(0, 60));
-
-                    // Load via CAF with HTTP URL
-                    const mediaInfo2 = playerManager.getMediaInformation();
-                    if (mediaInfo2) {
-                        mediaInfo2.contentUrl = httpUrl;
-                        mediaInfo2.contentId = httpUrl;
+                return new Promise((resolve) => {
+                    if (isHls) {
+                        // Try Strategy A: hls.js (works for HTTPS, may work for HTTP on Chromecast)
+                        if (Hls.isSupported()) {
+                            log('🎬 Strategy A: hls.js');
+                            tryHlsJs(url, startTime, () => {
+                                // hls.js failed, try Strategy B: native video.src
+                                log('🎬 Strategy B: native video.src');
+                                video.src = url;
+                                video.load();
+                                if (startTime > 0) {
+                                    video.addEventListener('loadedmetadata', () => {
+                                        video.currentTime = startTime;
+                                    }, { once: true });
+                                }
+                                video.play()
+                                    .then(() => log('▶️ native play() OK'))
+                                    .catch(err => {
+                                        log('⚠️ native play: ' + err.message);
+                                        // Strategy C: Let CAF try (return request)
+                                        // Already resolved null, can't go back to CAF
+                                    });
+                            });
+                        } else {
+                            // No hls.js support, try native directly
+                            log('🎬 Strategy B: native video.src (no hls.js)');
+                            video.src = url;
+                            video.load();
+                            video.play()
+                                .then(() => log('▶️ play() OK'))
+                                .catch(err => log('⚠️ play: ' + err.message));
+                        }
+                    } else {
+                        // Non-HLS: direct playback
+                        log('📺 Direct: video.src');
+                        video.src = url;
+                        if (startTime > 0) {
+                            video.addEventListener('loadedmetadata', () => {
+                                video.currentTime = startTime;
+                            }, { once: true });
+                        }
+                        video.play()
+                            .then(() => log('▶️ play() OK'))
+                            .catch(err => log('⚠️ play: ' + err.message));
                     }
-                    // Trigger reload
-                    playerManager.load(new cast.framework.messages.LoadRequestData());
-                    return;
-                }
+
+                    // Return null — we handle everything ourselves
+                    resolve(null);
+                });
             }
         );
 
-        function tryHlsJs(url) {
-            cleanupHls();
+        function tryHlsJs(url, startTime, onFail) {
+            let failed = false;
+
             hls = new Hls({
-                debug: false, enableWorker: true,
-                lowLatencyMode: false, backBufferLength: 30,
-                maxBufferLength: 30, maxMaxBufferLength: 60,
-                startLevel: -1, fragLoadingMaxRetry: 5,
-                manifestLoadingMaxRetry: 3, levelLoadingMaxRetry: 3,
+                debug: false,
+                enableWorker: true,
+                lowLatencyMode: false,
+                backBufferLength: 30,
+                maxBufferLength: 30,
+                maxMaxBufferLength: 60,
+                startLevel: -1,
+                fragLoadingMaxRetry: 3,
+                manifestLoadingMaxRetry: 2,
+                levelLoadingMaxRetry: 3,
                 fragLoadingRetryDelay: 1000,
+                manifestLoadingTimeOut: 8000,
             });
 
             hls.on(Hls.Events.MANIFEST_PARSED, (e, data) => {
-                log('✅ hls.js: ' + data.levels.length + ' levels');
-                video.play().then(() => log('▶️ play() OK'))
-                    .catch(err => log('⚠️ play: ' + err.message));
+                log('✅ hls.js: ' + data.levels.length + ' quality levels');
+                if (startTime > 0) video.currentTime = startTime;
+                video.play()
+                    .then(() => log('▶️ hls.js play() OK'))
+                    .catch(err => log('⚠️ hls.js play: ' + err.message));
             });
+
+            hls.on(Hls.Events.FRAG_LOADED, () => hideDebug());
 
             hls.on(Hls.Events.ERROR, (e, data) => {
                 log('❌ hls.js: ' + data.details);
-                if (data.fatal) {
-                    cleanupHls();
-                    // If hls.js fails too, try HTTP via direct video.src
-                    if (url.startsWith('https://')) {
-                        const httpUrl = url.replace(/^https:\/\//, 'http://');
-                        log('🔄 Stage 3: direct HTTP playback');
-                        video.src = httpUrl;
-                        video.play().then(() => log('▶️ play() OK'))
-                            .catch(err => log('⚠️ play: ' + err.message));
-                    }
+                if (data.fatal && !failed) {
+                    failed = true;
+                    hls.destroy();
+                    hls = null;
+                    log('💀 hls.js fatal, trying next strategy...');
+                    if (onFail) onFail();
                 }
-            });
-
-            hls.on(Hls.Events.FRAG_LOADED, () => {
-                setTimeout(() => { debugEl.style.display = 'none'; }, 3000);
             });
 
             hls.loadSource(url);
             hls.attachMedia(video);
         }
 
-        // ━━━━━━ Success events ━━━━━━
-        playerManager.addEventListener(
-            cast.framework.events.EventType.PLAYER_LOAD_COMPLETE,
-            () => {
-                log('🎉 CAF PLAYING!');
-                errorCount = 0;
-                setTimeout(() => { debugEl.style.display = 'none'; }, 3000);
-            }
-        );
-
-        video.addEventListener('playing', () => {
-            log('🎉 PLAYING');
-            setTimeout(() => { debugEl.style.display = 'none'; }, 3000);
-        });
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // Debug events
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        video.addEventListener('playing', () => { log('🎉 PLAYING!'); hideDebug(); });
+        video.addEventListener('pause', () => log('⏸️ PAUSED'));
+        video.addEventListener('waiting', () => log('⏳ BUFFERING'));
+        video.addEventListener('canplay', () => log('▶️ Can play'));
         video.addEventListener('error', () => {
             const err = video.error;
-            log('❌ Video: ' + (err ? 'code=' + err.code + ' ' + err.message : 'unknown'));
+            log('❌ Video: ' + (err ? 'code=' + err.code + ' ' + (err.message || '') : 'unknown'));
         });
 
-        // ━━━━━━ Start ━━━━━━
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // Start
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         const options = new cast.framework.CastReceiverOptions();
         options.disableIdleTimeout = true;
         options.mediaElement = video;
