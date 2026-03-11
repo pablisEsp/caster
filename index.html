@@ -7,7 +7,6 @@
         body { margin: 0; padding: 0; background: #000; overflow: hidden; }
         video { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; background: #000; }
 
-        /* Loading overlay */
         #loading {
             position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
             display: flex; flex-direction: column;
@@ -32,15 +31,6 @@
             font-size: 16px; margin-top: 20px;
             letter-spacing: 1px;
         }
-
-        /* Debug overlay */
-        #debug {
-            position: absolute; top: 10px; left: 10px; z-index: 999;
-            color: #0f0; font-family: monospace; font-size: 14px;
-            background: rgba(0,0,0,0.7); padding: 10px; border-radius: 5px;
-            max-width: 90vw; max-height: 90vh; overflow: auto;
-            pointer-events: none;
-        }
     </style>
 </head>
 <body>
@@ -48,7 +38,6 @@
         <div class="spinner"></div>
         <div id="loading-text">Loading...</div>
     </div>
-    <div id="debug"></div>
     <video id="media" autoplay></video>
 
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
@@ -58,16 +47,7 @@
         const video = document.getElementById('media');
         const loadingEl = document.getElementById('loading');
         const loadingText = document.getElementById('loading-text');
-        const debugEl = document.getElementById('debug');
         let hls = null;
-        let debugLines = [];
-
-        function log(msg) {
-            console.log('[Receiver]', msg);
-            debugLines.push(new Date().toLocaleTimeString() + ' ' + msg);
-            if (debugLines.length > 25) debugLines.shift();
-            debugEl.innerHTML = debugLines.join('<br>');
-        }
 
         function showLoading(text) {
             loadingText.textContent = text || 'Loading...';
@@ -79,10 +59,6 @@
 
         const context = cast.framework.CastReceiverContext.getInstance();
         const playerManager = context.getPlayerManager();
-
-        log('🚀 Receiver starting...');
-        log('📱 UA: ' + navigator.userAgent.substring(0, 60));
-        log('🔧 hls.js: ' + Hls.isSupported());
 
         function cleanup() {
             if (hls) { hls.destroy(); hls = null; }
@@ -97,9 +73,6 @@
                 const url = request.media.contentUrl || request.media.contentId;
                 const contentType = (request.media.contentType || '').toLowerCase();
                 const startTime = request.currentTime || 0;
-                log('📥 URL: ' + (url ? url.substring(0, 80) : 'null'));
-                log('📦 type: ' + contentType);
-                log('🔒 protocol: ' + (url ? url.split(':')[0] : '?'));
 
                 cleanup();
                 showLoading('Loading...');
@@ -110,9 +83,7 @@
 
                 return new Promise((resolve) => {
                     if (isHls && Hls.isSupported()) {
-                        log('🎬 Strategy A: hls.js');
                         tryHlsJs(url, startTime, () => {
-                            log('🎬 Strategy B: native video.src');
                             showLoading('Retrying...');
                             video.src = url;
                             video.load();
@@ -121,22 +92,20 @@
                                     video.currentTime = startTime;
                                 }, { once: true });
                             }
-                            video.play().catch(err => log('⚠️ native play: ' + err.message));
+                            video.play().catch(() => {});
                         });
                     } else if (isHls && !Hls.isSupported() && video.canPlayType('application/vnd.apple.mpegurl')) {
-                        log('🎬 Native HLS');
                         video.src = url;
                         video.load();
-                        video.play().catch(err => log('⚠️ play: ' + err.message));
+                        video.play().catch(() => {});
                     } else {
-                        log('📺 Direct video.src');
                         video.src = url;
                         if (startTime > 0) {
                             video.addEventListener('loadedmetadata', () => {
                                 video.currentTime = startTime;
                             }, { once: true });
                         }
-                        video.play().catch(err => log('⚠️ play: ' + err.message));
+                        video.play().catch(() => {});
                     }
                     resolve(null);
                 });
@@ -154,26 +123,16 @@
                 fragLoadingRetryDelay: 1000, manifestLoadingTimeOut: 10000,
             });
 
-            hls.on(Hls.Events.MANIFEST_PARSED, (e, data) => {
-                log('✅ hls.js: ' + data.levels.length + ' quality levels');
-                if (data.levels.length > 0) {
-                    const lvl = data.levels[0];
-                    log('🎞️ codec: ' + (lvl.codecSet || lvl.videoCodec || 'unknown'));
-                    log('🎞️ res: ' + (lvl.width || '?') + 'x' + (lvl.height || '?'));
-                }
+            hls.on(Hls.Events.MANIFEST_PARSED, () => {
                 showLoading('Buffering...');
                 if (startTime > 0) video.currentTime = startTime;
-                video.play()
-                    .then(() => log('▶️ play() OK'))
-                    .catch(err => log('⚠️ play: ' + err.message));
+                video.play().catch(() => {});
             });
 
             hls.on(Hls.Events.ERROR, (e, data) => {
-                log('❌ hls.js: ' + data.details);
                 if (data.fatal && !failed) {
                     failed = true;
                     hls.destroy(); hls = null;
-                    log('💀 hls.js fatal, next strategy...');
                     if (onFail) onFail();
                 }
             });
@@ -182,16 +141,11 @@
             hls.attachMedia(video);
         }
 
-        // ━━━━━━ Loading/playback events ━━━━━━
-        video.addEventListener('playing', () => { log('🎉 PLAYING!'); hideLoading(); });
-        video.addEventListener('waiting', () => { log('⏳ BUFFERING'); showLoading('Buffering...'); });
+        // ━━━━━━ Loading state ━━━━━━
+        video.addEventListener('playing', () => hideLoading());
+        video.addEventListener('waiting', () => showLoading('Buffering...'));
         video.addEventListener('canplay', () => {
-            log('▶️ Can play');
             setTimeout(() => { if (!video.paused) hideLoading(); }, 300);
-        });
-        video.addEventListener('error', () => {
-            const err = video.error;
-            log('❌ Video: ' + (err ? 'code=' + err.code + ' ' + (err.message || '') : 'unknown'));
         });
 
         // ━━━━━━ Start ━━━━━━
@@ -199,7 +153,6 @@
         options.disableIdleTimeout = true;
         options.mediaElement = video;
         context.start(options);
-        log('✅ Receiver started');
     </script>
 </body>
 </html>
