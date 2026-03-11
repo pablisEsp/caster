@@ -1,67 +1,80 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <title>IPTV Cast Receiver</title>
     <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background: #000;
-            overflow: hidden;
+        body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+        video { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; background: #000; }
+
+        /* Loading overlay */
+        #loading {
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            z-index: 100; background: #000;
+            transition: opacity 0.5s ease;
+        }
+        #loading.hidden { opacity: 0; pointer-events: none; }
+
+        .spinner {
+            width: 50px; height: 50px;
+            border: 4px solid rgba(255,255,255,0.15);
+            border-top: 4px solid #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        #loading-text {
+            color: rgba(255,255,255,0.6);
+            font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+            font-size: 16px; margin-top: 20px;
+            letter-spacing: 1px;
         }
 
-        video {
-            width: 100vw;
-            height: 100vh;
-            position: absolute;
-            top: 0;
-            left: 0;
-            background: #000;
-        }
-
+        /* Debug overlay */
         #debug {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            z-index: 999;
-            color: #0f0;
-            font-family: monospace;
-            font-size: 14px;
-            background: rgba(0, 0, 0, 0.7);
-            padding: 10px;
-            border-radius: 5px;
-            max-width: 90vw;
-            max-height: 90vh;
-            overflow: auto;
+            position: absolute; top: 10px; left: 10px; z-index: 999;
+            color: #0f0; font-family: monospace; font-size: 14px;
+            background: rgba(0,0,0,0.7); padding: 10px; border-radius: 5px;
+            max-width: 90vw; max-height: 90vh; overflow: auto;
             pointer-events: none;
         }
     </style>
 </head>
-
 <body>
+    <div id="loading">
+        <div class="spinner"></div>
+        <div id="loading-text">Loading...</div>
+    </div>
     <div id="debug"></div>
     <video id="media" autoplay></video>
+
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
     <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
     <script>
         'use strict';
-        const TAG = '[Receiver]';
         const video = document.getElementById('media');
+        const loadingEl = document.getElementById('loading');
+        const loadingText = document.getElementById('loading-text');
         const debugEl = document.getElementById('debug');
         let hls = null;
         let debugLines = [];
 
         function log(msg) {
-            console.log(TAG, msg);
+            console.log('[Receiver]', msg);
             debugLines.push(new Date().toLocaleTimeString() + ' ' + msg);
             if (debugLines.length > 25) debugLines.shift();
             debugEl.innerHTML = debugLines.join('<br>');
         }
 
-        function hideDebug() {
-            setTimeout(() => { debugEl.style.display = 'none'; }, 3000);
+        function showLoading(text) {
+            loadingText.textContent = text || 'Loading...';
+            loadingEl.classList.remove('hidden');
+        }
+        function hideLoading() {
+            loadingEl.classList.add('hidden');
         }
 
         const context = cast.framework.CastReceiverContext.getInstance();
@@ -70,8 +83,6 @@
         log('🚀 Receiver starting...');
         log('📱 UA: ' + navigator.userAgent.substring(0, 60));
         log('🔧 hls.js: ' + Hls.isSupported());
-        log('🔧 native HLS: ' + video.canPlayType('application/vnd.apple.mpegurl'));
-        log('🔧 native m3u8: ' + video.canPlayType('application/x-mpegURL'));
 
         function cleanup() {
             if (hls) { hls.destroy(); hls = null; }
@@ -79,9 +90,7 @@
             video.load();
         }
 
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // LOAD interceptor — try multiple strategies
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // ━━━━━━ LOAD interceptor ━━━━━━
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.LOAD,
             (request) => {
@@ -93,67 +102,42 @@
                 log('🔒 protocol: ' + (url ? url.split(':')[0] : '?'));
 
                 cleanup();
+                showLoading('Loading...');
 
-                if (!url) {
-                    log('❌ No URL');
-                    return request;
-                }
+                if (!url) return request;
 
                 const isHls = url.includes('.m3u8') || contentType.includes('mpegurl');
-                const isHttp = url.startsWith('http://');
-
-                // Strategy selection:
-                // 1. HTTPS HLS → hls.js (best compatibility)
-                // 2. HTTP HLS → try native video.src, then hls.js, then CAF
-                // 3. Non-HLS → direct video.src
 
                 return new Promise((resolve) => {
-                    if (isHls) {
-                        // Try Strategy A: hls.js (works for HTTPS, may work for HTTP on Chromecast)
-                        if (Hls.isSupported()) {
-                            log('🎬 Strategy A: hls.js');
-                            tryHlsJs(url, startTime, () => {
-                                // hls.js failed, try Strategy B: native video.src
-                                log('🎬 Strategy B: native video.src');
-                                video.src = url;
-                                video.load();
-                                if (startTime > 0) {
-                                    video.addEventListener('loadedmetadata', () => {
-                                        video.currentTime = startTime;
-                                    }, { once: true });
-                                }
-                                video.play()
-                                    .then(() => log('▶️ native play() OK'))
-                                    .catch(err => {
-                                        log('⚠️ native play: ' + err.message);
-                                        // Strategy C: Let CAF try (return request)
-                                        // Already resolved null, can't go back to CAF
-                                    });
-                            });
-                        } else {
-                            // No hls.js support, try native directly
-                            log('🎬 Strategy B: native video.src (no hls.js)');
+                    if (isHls && Hls.isSupported()) {
+                        log('🎬 Strategy A: hls.js');
+                        tryHlsJs(url, startTime, () => {
+                            log('🎬 Strategy B: native video.src');
+                            showLoading('Retrying...');
                             video.src = url;
                             video.load();
-                            video.play()
-                                .then(() => log('▶️ play() OK'))
-                                .catch(err => log('⚠️ play: ' + err.message));
-                        }
+                            if (startTime > 0) {
+                                video.addEventListener('loadedmetadata', () => {
+                                    video.currentTime = startTime;
+                                }, { once: true });
+                            }
+                            video.play().catch(err => log('⚠️ native play: ' + err.message));
+                        });
+                    } else if (isHls && !Hls.isSupported() && video.canPlayType('application/vnd.apple.mpegurl')) {
+                        log('🎬 Native HLS');
+                        video.src = url;
+                        video.load();
+                        video.play().catch(err => log('⚠️ play: ' + err.message));
                     } else {
-                        // Non-HLS: direct playback
-                        log('📺 Direct: video.src');
+                        log('📺 Direct video.src');
                         video.src = url;
                         if (startTime > 0) {
                             video.addEventListener('loadedmetadata', () => {
                                 video.currentTime = startTime;
                             }, { once: true });
                         }
-                        video.play()
-                            .then(() => log('▶️ play() OK'))
-                            .catch(err => log('⚠️ play: ' + err.message));
+                        video.play().catch(err => log('⚠️ play: ' + err.message));
                     }
-
-                    // Return null — we handle everything ourselves
                     resolve(null);
                 });
             }
@@ -161,57 +145,35 @@
 
         function tryHlsJs(url, startTime, onFail) {
             let failed = false;
-
             hls = new Hls({
-                debug: false,
-                enableWorker: true,
-                lowLatencyMode: false,
-                backBufferLength: 30,
-                maxBufferLength: 30,
-                maxMaxBufferLength: 60,
-                startLevel: -1,
-                fragLoadingMaxRetry: 3,
-                manifestLoadingMaxRetry: 2,
-                levelLoadingMaxRetry: 3,
-                fragLoadingRetryDelay: 1000,
-                manifestLoadingTimeOut: 8000,
+                debug: false, enableWorker: true,
+                lowLatencyMode: false, backBufferLength: 30,
+                maxBufferLength: 30, maxMaxBufferLength: 60,
+                startLevel: -1, fragLoadingMaxRetry: 5,
+                manifestLoadingMaxRetry: 3, levelLoadingMaxRetry: 3,
+                fragLoadingRetryDelay: 1000, manifestLoadingTimeOut: 10000,
             });
 
             hls.on(Hls.Events.MANIFEST_PARSED, (e, data) => {
                 log('✅ hls.js: ' + data.levels.length + ' quality levels');
-                // Log codec info to diagnose unsupported codecs
                 if (data.levels.length > 0) {
                     const lvl = data.levels[0];
                     log('🎞️ codec: ' + (lvl.codecSet || lvl.videoCodec || 'unknown'));
-                    log('🎞️ video: ' + (lvl.videoCodec || '?') + ' audio: ' + (lvl.audioCodec || '?'));
                     log('🎞️ res: ' + (lvl.width || '?') + 'x' + (lvl.height || '?'));
                 }
+                showLoading('Buffering...');
                 if (startTime > 0) video.currentTime = startTime;
                 video.play()
-                    .then(() => log('▶️ hls.js play() OK'))
-                    .catch(err => log('⚠️ hls.js play: ' + err.message));
-
-                // Stall detector — if not playing after 10s, log video state
-                setTimeout(() => {
-                    if (video.paused || video.readyState < 3) {
-                        log('⚠️ STALL: paused=' + video.paused +
-                            ' ready=' + video.readyState +
-                            ' network=' + video.networkState +
-                            ' buffered=' + (video.buffered.length > 0 ? video.buffered.end(0).toFixed(1) + 's' : '0'));
-                        log('⚠️ videoW=' + video.videoWidth + ' videoH=' + video.videoHeight);
-                    }
-                }, 10000);
+                    .then(() => log('▶️ play() OK'))
+                    .catch(err => log('⚠️ play: ' + err.message));
             });
-
-            hls.on(Hls.Events.FRAG_LOADED, () => hideDebug());
 
             hls.on(Hls.Events.ERROR, (e, data) => {
                 log('❌ hls.js: ' + data.details);
                 if (data.fatal && !failed) {
                     failed = true;
-                    hls.destroy();
-                    hls = null;
-                    log('💀 hls.js fatal, trying next strategy...');
+                    hls.destroy(); hls = null;
+                    log('💀 hls.js fatal, next strategy...');
                     if (onFail) onFail();
                 }
             });
@@ -220,21 +182,19 @@
             hls.attachMedia(video);
         }
 
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Debug events
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        video.addEventListener('playing', () => { log('🎉 PLAYING!'); hideDebug(); });
-        video.addEventListener('pause', () => log('⏸️ PAUSED'));
-        video.addEventListener('waiting', () => log('⏳ BUFFERING'));
-        video.addEventListener('canplay', () => log('▶️ Can play'));
+        // ━━━━━━ Loading/playback events ━━━━━━
+        video.addEventListener('playing', () => { log('🎉 PLAYING!'); hideLoading(); });
+        video.addEventListener('waiting', () => { log('⏳ BUFFERING'); showLoading('Buffering...'); });
+        video.addEventListener('canplay', () => {
+            log('▶️ Can play');
+            setTimeout(() => { if (!video.paused) hideLoading(); }, 300);
+        });
         video.addEventListener('error', () => {
             const err = video.error;
             log('❌ Video: ' + (err ? 'code=' + err.code + ' ' + (err.message || '') : 'unknown'));
         });
 
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        // Start
-        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // ━━━━━━ Start ━━━━━━
         const options = new cast.framework.CastReceiverOptions();
         options.disableIdleTimeout = true;
         options.mediaElement = video;
@@ -242,5 +202,4 @@
         log('✅ Receiver started');
     </script>
 </body>
-
 </html>
