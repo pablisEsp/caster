@@ -179,10 +179,28 @@
 
             hls.on(Hls.Events.MANIFEST_PARSED, (e, data) => {
                 log('✅ hls.js: ' + data.levels.length + ' quality levels');
+                // Log codec info to diagnose unsupported codecs
+                if (data.levels.length > 0) {
+                    const lvl = data.levels[0];
+                    log('🎞️ codec: ' + (lvl.codecSet || lvl.videoCodec || 'unknown'));
+                    log('🎞️ video: ' + (lvl.videoCodec || '?') + ' audio: ' + (lvl.audioCodec || '?'));
+                    log('🎞️ res: ' + (lvl.width || '?') + 'x' + (lvl.height || '?'));
+                }
                 if (startTime > 0) video.currentTime = startTime;
                 video.play()
                     .then(() => log('▶️ hls.js play() OK'))
                     .catch(err => log('⚠️ hls.js play: ' + err.message));
+
+                // Stall detector — if not playing after 10s, log video state
+                setTimeout(() => {
+                    if (video.paused || video.readyState < 3) {
+                        log('⚠️ STALL: paused=' + video.paused +
+                            ' ready=' + video.readyState +
+                            ' network=' + video.networkState +
+                            ' buffered=' + (video.buffered.length > 0 ? video.buffered.end(0).toFixed(1) + 's' : '0'));
+                        log('⚠️ videoW=' + video.videoWidth + ' videoH=' + video.videoHeight);
+                    }
+                }, 10000);
             });
 
             hls.on(Hls.Events.FRAG_LOADED, () => hideDebug());
