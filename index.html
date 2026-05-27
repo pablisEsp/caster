@@ -132,6 +132,12 @@
     <video id="media" autoplay></video>
 
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
+    <!-- mpegts.js: transmuxes raw MPEG-TS (.ts over HTTP) to fMP4 + MSE.
+         Needed because Chromecast's <video> element rejects video/mp2t as
+         a direct src — only segments inside an HLS manifest are handled
+         natively. Catch-up streams (xtream "timeshift") are typically
+         served as a single .ts file, so they land here. -->
+    <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js"></script>
     <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
     <script>
         'use strict';
@@ -165,6 +171,7 @@
         const errorRetry = document.getElementById('error-retry');
 
         let hls = null;
+        let mpegtsPlayer = null;
 
         // Last LOAD request — kept for Retry and recovery diagnostics.
         let lastLoad = null;
@@ -252,6 +259,13 @@
 
         function cleanup() {
             if (hls) { hls.destroy(); hls = null; }
+            if (mpegtsPlayer) {
+                try { mpegtsPlayer.pause(); } catch (_) {}
+                try { mpegtsPlayer.unload(); } catch (_) {}
+                try { mpegtsPlayer.detachMediaElement(); } catch (_) {}
+                try { mpegtsPlayer.destroy(); } catch (_) {}
+                mpegtsPlayer = null;
+            }
             video.removeAttribute('src');
             video.load();
         }
@@ -310,6 +324,15 @@
                 lastLoad = { url, startTime, contentType };
 
                 const isHls = url.includes('.m3u8') || contentType.includes('mpegurl');
+                // Catch-up / timeshift streams are raw MPEG-TS over HTTP.
+                // Chromecast's <video> element rejects `video/mp2t` as src
+                // with MediaError code 4, so route them through mpegts.js
+                // which transmuxes TS → fMP4 and feeds it via MSE.
+                const isRawTs = !isHls && (
+                    sum.ext === '.ts' ||
+                    contentType.includes('mp2t') ||
+                    contentType.includes('mpeg-ts')
+                );
 
                 if (isHls && Hls.isSupported()) {
                     dbg('engine', 'hls.js', 'ok');
@@ -318,6 +341,10 @@
                 if (isHls && !Hls.isSupported() && video.canPlayType('application/vnd.apple.mpegurl')) {
                     dbg('engine', 'native HLS', 'ok');
                     return loadWithCafNative(request);
+                }
+                if (isRawTs && typeof mpegts !== 'undefined' && mpegts.isSupported()) {
+                    dbg('engine', 'mpegts.js', 'ok');
+                    return loadWithMpegTs(request, url, startTime);
                 }
                 dbg('engine', `native (${sum.ext})`, 'ok');
                 return loadWithCafNative(request);
@@ -407,6 +434,93 @@
 
                 tryHlsJs(url, startTime, onFatal);
             });
+        }
+
+        // ━━━━━━ MPEG-TS engine (mpegts.js via MSE) ━━━━━━
+        //
+        // Used for raw .ts files (typically catch-up / xtream timeshift).
+        // Like hls.js, mpegts.js owns the <video> element through MSE so
+        // CAF doesn't try to re-assign video.src after we resolve.
+        function loadWithMpegTs(request, url, startTime) {
+            return new Promise((resolve) => {
+                let settled = false;
+                const onFirstPlaying = () => {
+                    if (settled) return;
+                    settled = true;
+                    video.removeEventListener('playing', onFirstPlaying);
+                    dbg('LOAD', 'video PLAYING → resolving CAF', 'ok');
+                    resolve(request);
+                };
+                video.addEventListener('playing', onFirstPlaying);
+
+                const onFatal = (codeLine, kind) => {
+                    if (settled) return;
+                    settled = true;
+                    video.removeEventListener('playing', onFirstPlaying);
+                    dbg('LOAD', `fatal → ${codeLine}`, 'err');
+                    showError({ codeLine, kind });
+                    const err = new cast.framework.messages.ErrorData(
+                        cast.framework.messages.ErrorType.LOAD_FAILED
+                    );
+                    err.reason = cast.framework.messages.ErrorReason.GENERIC_LOAD_ERROR;
+                    resolve(err);
+                };
+
+                setTimeout(() => {
+                    if (settled) return;
+                    settled = true;
+                    video.removeEventListener('playing', onFirstPlaying);
+                    dbg('LOAD', 'no PLAYING in 20s — resolving optimistically', 'warn');
+                    resolve(request);
+                }, 20000);
+
+                tryMpegTs(url, startTime, onFatal);
+            });
+        }
+
+        function tryMpegTs(url, startTime, onFatal) {
+            // Catch-up segments come in as a single .ts file with a known
+            // total duration — that's VOD-like from mpegts.js's point of
+            // view (isLive: false), which enables seeking.
+            mpegtsPlayer = mpegts.createPlayer({
+                type: 'mpegts',
+                isLive: false,
+                url: url,
+            }, {
+                enableWorker: true,
+                enableStashBuffer: true,
+                stashInitialSize: 128,
+                // Don't pre-buffer aggressively — keeps memory low on
+                // older Chromecasts and lets seek take effect faster.
+                lazyLoad: true,
+                lazyLoadMaxDuration: 30,
+                seekType: 'range',
+            });
+
+            mpegtsPlayer.on(mpegts.Events.MEDIA_INFO, (info) => {
+                const w = (info && info.width) || 0;
+                const h = (info && info.height) || 0;
+                const v = (info && info.videoCodec) || '?';
+                const a = (info && info.audioCodec) || '?';
+                dbg('mpegts', `media ${w}x${h} ${v}+${a}`, 'ok');
+                if (startTime > 0) video.currentTime = startTime;
+                video.play().catch((e) =>
+                    dbg('mpegts', `play() rejected: ${e.message || e}`, 'warn')
+                );
+            });
+
+            mpegtsPlayer.on(mpegts.Events.ERROR, (errType, errDetail, errInfo) => {
+                const code = (errInfo && (errInfo.code != null ? errInfo.code : '')) + '';
+                const msg = (errInfo && errInfo.msg) || '';
+                const detail = `${errType || 'ERROR'} · ${errDetail || 'unknown'}` +
+                    (code ? ` · code ${code}` : '') +
+                    (msg ? ` · ${msg}` : '');
+                dbg('mpegts', detail, 'err');
+                if (onFatal) onFatal(detail);
+            });
+
+            mpegtsPlayer.attachMediaElement(video);
+            mpegtsPlayer.load();
         }
 
         function tryHlsJs(url, startTime, onFatal) {
@@ -629,14 +743,22 @@
             cleanup();
             showLoading(t('retrying'));
             const { url, startTime, contentType } = lastLoad;
-            const isHls = url.includes('.m3u8') || (contentType || '').includes('mpegurl');
+            const ct = (contentType || '').toLowerCase();
+            const ext = (urlSummary(url).ext || '').toLowerCase();
+            const isHls = url.includes('.m3u8') || ct.includes('mpegurl');
+            const isRawTs = !isHls && (ext === '.ts' || ct.includes('mp2t') || ct.includes('mpeg-ts'));
+
+            const onRetryFatal = (codeLine, kind) => {
+                showError({ codeLine, kind });
+            };
+
             if (isHls && Hls.isSupported()) {
-                tryHlsJs(url, startTime, (codeLine, kind) => {
-                    showError({ codeLine, kind });
-                });
+                tryHlsJs(url, startTime, onRetryFatal);
+            } else if (isRawTs && typeof mpegts !== 'undefined' && mpegts.isSupported()) {
+                tryMpegTs(url, startTime, onRetryFatal);
             } else {
-                // For native, set the src directly — CAF isn't in the loop
-                // for retries so there's no risk of a duplicate load here.
+                // Native: set src directly — CAF isn't in the loop on
+                // manual retries so there's no duplicate-load risk.
                 video.src = url;
                 video.load();
                 if (startTime > 0) {
