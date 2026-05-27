@@ -263,8 +263,12 @@
         // ━━━━━━ Debug panel ━━━━━━
         //
         // dbg(tag, msg, level?) — level ∈ {ok, warn, err, info (default)}.
-        // The panel appears as soon as anything is logged. If playback
-        // reaches PLAYING it auto-fades unless ?debug=1 forces it visible.
+        // The panel is disabled by default in production builds. To
+        // re-enable it temporarily, append `?debug=1` to the receiver
+        // URL in the Cast Developer Console — `DEBUG_ALWAYS_VISIBLE`
+        // below picks that up and forces the panel to render. The
+        // scattered `dbg()` calls throughout the file are kept intact so
+        // re-enabling is just a URL flag, not a code change.
         const DEBUG_ALWAYS_VISIBLE = (() => {
             try {
                 return new URLSearchParams(location.search).get('debug') === '1';
@@ -276,6 +280,10 @@
         const dbgRows = [];
 
         function dbg(tag, msg, level) {
+            // Hard no-op unless ?debug=1 is set on the receiver URL.
+            // Everything below would otherwise render the panel — gating
+            // here keeps the call sites unchanged.
+            if (!DEBUG_ALWAYS_VISIBLE) return;
             const now = new Date();
             const time = now.toTimeString().slice(0, 8) + '.' +
                 String(now.getMilliseconds()).padStart(3, '0');
