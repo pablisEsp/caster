@@ -302,6 +302,24 @@
 
                 lastLoad = { url, startTime, contentType };
 
+                // Build the request copy that we hand back to CAF: keep
+                // metadata (title, images, streamType, contentType) so the
+                // sender gets a proper status broadcast, but strip the
+                // URL/contentId. Otherwise CAF reads them on resolve and
+                // re-assigns video.src, which interrupts our pending play()
+                // ("The play() request was interrupted by a new load
+                // request") and forces the whole thing to restart from
+                // scratch — particularly bad for VOD with a startTime,
+                // where each restart re-does the slow Range-fetch seek.
+                const reqForCaf = {
+                    ...request,
+                    media: {
+                        ...request.media,
+                        contentUrl: undefined,
+                        contentId: undefined,
+                    },
+                };
+
                 return new Promise((resolve) => {
                     let settled = false;
                     // The <video> element's first `playing` event is the
@@ -314,7 +332,7 @@
                         settled = true;
                         video.removeEventListener('playing', onFirstPlaying);
                         dbg('LOAD', 'video PLAYING → resolving CAF', 'ok');
-                        resolve(request);
+                        resolve(reqForCaf);
                     };
                     video.addEventListener('playing', onFirstPlaying);
 
@@ -334,18 +352,19 @@
                     };
                     // Safety net: if neither `playing` nor a fatal error
                     // arrives, resolve optimistically so CAF doesn't hang
-                    // forever. The video element will keep trying behind it.
+                    // forever. The video element will keep trying behind
+                    // it; common with .mkv VOD + startTime where Range
+                    // fetches to the seek position can take 20+ s.
                     setTimeout(() => {
                         if (settled) return;
                         settled = true;
                         video.removeEventListener('playing', onFirstPlaying);
-                        dbg('LOAD', 'no PLAYING in 15s — resolving optimistically', 'warn');
-                        resolve(request);
-                    }, 15000);
+                        dbg('LOAD', 'no PLAYING in 25s — resolving optimistically', 'warn');
+                        resolve(reqForCaf);
+                    }, 25000);
                     // onReady from the engines is now informational only —
                     // the actual CAF resolve happens on the video `playing`
-                    // event above. We pass an empty handler so the engine
-                    // signatures stay stable.
+                    // event above.
                     startPlayback(url, startTime, contentType, {
                         onReady: () => {},
                         onFatal,
