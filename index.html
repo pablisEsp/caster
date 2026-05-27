@@ -145,6 +145,7 @@
                 retrying: 'Retrying...',
                 seeking: 'Seeking…',
                 seekingSlow: 'Seeking — this may take a moment',
+                seekingStuck: 'Seek is taking too long — the server may not support this position. Try a different moment or stop casting.',
                 errorTitle: 'Stream unavailable',
                 errorSubtitle: "The provider's server isn't responding. This isn't an app issue — try another channel or check back later.",
                 codecTitle: 'This Chromecast can\'t play that codec',
@@ -528,9 +529,16 @@
                 isSeeking = true;
                 showLoading(t('seeking'));
                 if (seekSlowTimer) clearTimeout(seekSlowTimer);
+                if (seekStuckTimer) clearTimeout(seekStuckTimer);
                 seekSlowTimer = setTimeout(() => {
                     if (isSeeking) showLoading(t('seekingSlow'));
                 }, SEEK_SLOW_THRESHOLD_MS);
+                seekStuckTimer = setTimeout(() => {
+                    if (isSeeking) {
+                        dbg('cmd', `SEEK stuck >${SEEK_STUCK_THRESHOLD_MS / 1000}s`, 'err');
+                        showLoading(t('seekingStuck'));
+                    }
+                }, SEEK_STUCK_THRESHOLD_MS);
                 return message;
             }
         );
@@ -546,17 +554,27 @@
         //
         // For large unsegmented files (.mkv / .mp4 from IPTV providers)
         // a real seek can take 10-30 s while the receiver Range-fetches
-        // the new position; after 5 s we escalate to a "this may take a
-        // moment" copy so the user knows it isn't stuck.
+        // the new position. Escalation:
+        //   * 5 s  → "Seeking — this may take a moment"
+        //   * 30 s → "Seek is taking too long…" (server probably won't
+        //            respond; the user should try another position or
+        //            stop the cast). The video element keeps trying in
+        //            the background; we just stop pretending it's fine.
         let isSeeking = false;
         let seekSlowTimer = null;
+        let seekStuckTimer = null;
         const SEEK_SLOW_THRESHOLD_MS = 5000;
+        const SEEK_STUCK_THRESHOLD_MS = 30000;
 
         function clearSeekState() {
             isSeeking = false;
             if (seekSlowTimer) {
                 clearTimeout(seekSlowTimer);
                 seekSlowTimer = null;
+            }
+            if (seekStuckTimer) {
+                clearTimeout(seekStuckTimer);
+                seekStuckTimer = null;
             }
         }
 
