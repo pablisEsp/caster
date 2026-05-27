@@ -145,6 +145,8 @@
                 retrying: 'Retrying...',
                 errorTitle: 'Stream unavailable',
                 errorSubtitle: "The provider's server isn't responding. This isn't an app issue — try another channel or check back later.",
+                codecTitle: 'This Chromecast can\'t play that codec',
+                codecSubtitle: "Your Chromecast doesn't support the video / audio codec inside this file (often HEVC, AV1 or EAC3). Try a different release or use a newer Chromecast model.",
                 retry: 'Retry',
             },
         };
@@ -172,9 +174,13 @@
             loadingEl.classList.add('hidden');
         }
 
-        function showError({ codeLine }) {
-            errorTitle.textContent = t('errorTitle');
-            errorSubtitle.textContent = t('errorSubtitle');
+        function showError({ codeLine, kind }) {
+            // `kind` lets callers pick a more specific copy:
+            //   'codec'   → "This Chromecast can't play that codec"
+            //   default  → generic "Stream unavailable"
+            const isCodec = kind === 'codec';
+            errorTitle.textContent = t(isCodec ? 'codecTitle' : 'errorTitle');
+            errorSubtitle.textContent = t(isCodec ? 'codecSubtitle' : 'errorSubtitle');
             errorRetry.textContent = t('retry');
             errorCode.textContent = codeLine || '';
             hideLoading();
@@ -320,11 +326,14 @@
         function attachNative(url, startTime, prevDetail) {
             video.src = url;
             video.load();
-            if (startTime > 0) {
-                video.addEventListener('loadedmetadata', () => {
-                    video.currentTime = startTime;
-                }, { once: true });
-            }
+            // Track whether the container was successfully parsed. If we see
+            // `loadedmetadata` and then later get a MediaError, the failure
+            // is almost certainly the codec rather than the URL / network.
+            let metadataSeen = false;
+            video.addEventListener('loadedmetadata', () => {
+                metadataSeen = true;
+                if (startTime > 0) video.currentTime = startTime;
+            }, { once: true });
             // Catch native MediaElement errors — these are the only signal
             // we get when the native fallback also fails.
             const onNativeError = () => {
@@ -335,7 +344,15 @@
                 const msg = video.error && video.error.message ? ` "${video.error.message}"` : '';
                 dbg('native', `MediaError code=${code} ${kind}${msg}`, 'err');
                 const detail = prevDetail ? `${prevDetail} → ${kind}` : `MEDIA_ERROR · ${kind}`;
-                showError({ codeLine: detail });
+                // Codec-mismatch signature: header parsed (we saw metadata)
+                // but the pipeline still rejected the source. Surface a
+                // clearer "codec not supported" message instead of the
+                // generic network one.
+                const isCodecError = metadataSeen && (code === 3 || code === 4);
+                showError({
+                    codeLine: detail,
+                    kind: isCodecError ? 'codec' : undefined,
+                });
             };
             video.addEventListener('error', onNativeError);
             video.play().catch((e) => dbg('native', `play() rejected: ${e.message || e}`, 'warn'));
