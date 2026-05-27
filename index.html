@@ -302,24 +302,6 @@
 
                 lastLoad = { url, startTime, contentType };
 
-                // Build the request copy that we hand back to CAF: keep
-                // metadata (title, images, streamType, contentType) so the
-                // sender gets a proper status broadcast, but strip the
-                // URL/contentId. Otherwise CAF reads them on resolve and
-                // re-assigns video.src, which interrupts our pending play()
-                // ("The play() request was interrupted by a new load
-                // request") and forces the whole thing to restart from
-                // scratch — particularly bad for VOD with a startTime,
-                // where each restart re-does the slow Range-fetch seek.
-                const reqForCaf = {
-                    ...request,
-                    media: {
-                        ...request.media,
-                        contentUrl: undefined,
-                        contentId: undefined,
-                    },
-                };
-
                 return new Promise((resolve) => {
                     let settled = false;
                     // The <video> element's first `playing` event is the
@@ -332,7 +314,12 @@
                         settled = true;
                         video.removeEventListener('playing', onFirstPlaying);
                         dbg('LOAD', 'video PLAYING → resolving CAF', 'ok');
-                        resolve(reqForCaf);
+                        // Known limitation: resolving with the request lets
+                        // CAF re-assign video.src after this point, causing
+                        // a second metadata + playing pair. Cosmetic ~2-4s
+                        // extra on startup; the fix lives in the B refactor
+                        // (likely setMediaPlaybackInfoHandler).
+                        resolve(request);
                     };
                     video.addEventListener('playing', onFirstPlaying);
 
@@ -360,7 +347,7 @@
                         settled = true;
                         video.removeEventListener('playing', onFirstPlaying);
                         dbg('LOAD', 'no PLAYING in 25s — resolving optimistically', 'warn');
-                        resolve(reqForCaf);
+                        resolve(request);
                     }, 25000);
                     // onReady from the engines is now informational only —
                     // the actual CAF resolve happens on the video `playing`
