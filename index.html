@@ -17,6 +17,7 @@
         }
         .overlay.hidden { opacity: 0; pointer-events: none; }
 
+        #ready { z-index: 50; }
         #loading { z-index: 100; }
         #error { z-index: 200; }
 
@@ -33,6 +34,26 @@
             color: rgba(255,255,255,0.6);
             font-size: 16px; margin-top: 20px;
             letter-spacing: 1px;
+        }
+
+        /* ━━━━━━ Ready (idle, connected, no media yet) overlay ━━━━━━ */
+        #ready-icon {
+            width: 96px; height: 96px;
+            border-radius: 50%;
+            background: rgba(99, 102, 241, 0.15);
+            display: flex; align-items: center; justify-content: center;
+            margin-bottom: 28px;
+        }
+        #ready-icon svg { width: 52px; height: 52px; fill: #818cf8; }
+        #ready-title {
+            color: #fff; font-size: 30px; font-weight: 600;
+            margin-bottom: 10px; text-align: center;
+            max-width: 720px; padding: 0 32px;
+        }
+        #ready-subtitle {
+            color: rgba(255,255,255,0.55); font-size: 16px;
+            line-height: 1.5; text-align: center;
+            max-width: 640px; padding: 0 32px;
         }
 
         /* ━━━━━━ Error overlay ━━━━━━ */
@@ -112,7 +133,14 @@
     </style>
 </head>
 <body>
-    <div id="loading" class="overlay">
+    <div id="ready" class="overlay">
+        <div id="ready-icon">
+            <svg viewBox="0 0 24 24"><path d="M21 3H3c-1.1 0-2 .9-2 2v3h2V5h18v14h-7v2h7c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM1 18v3h3c0-1.66-1.34-3-3-3zm0-4v2c2.76 0 5 2.24 5 5h2c0-3.87-3.13-7-7-7zm0-4v2c4.97 0 9 4.03 9 9h2c0-6.08-4.93-11-11-11z"/></svg>
+        </div>
+        <div id="ready-title">Ready to cast</div>
+        <div id="ready-subtitle">Pick a channel or video on your phone to start streaming.</div>
+    </div>
+    <div id="loading" class="overlay hidden">
         <div class="spinner"></div>
         <div id="loading-text">Loading...</div>
     </div>
@@ -146,6 +174,8 @@
                 seeking: 'Seeking…',
                 seekingSlow: 'Seeking — this may take a moment',
                 seekingStuck: 'Seek is taking too long — the server may not support this position. Try a different moment or stop casting.',
+                readyTitle: 'Ready to cast',
+                readySubtitle: 'Pick a channel or video on your phone to start streaming.',
                 errorTitle: 'Stream unavailable',
                 errorSubtitle: "The provider's server isn't responding. This isn't an app issue — try another channel or check back later.",
                 codecTitle: "This Chromecast can't play that codec",
@@ -160,6 +190,9 @@
         const t = (key) => (STRINGS[LANG] && STRINGS[LANG][key]) || STRINGS.en[key];
 
         const video = document.getElementById('media');
+        const readyEl = document.getElementById('ready');
+        const readyTitleEl = document.getElementById('ready-title');
+        const readySubtitleEl = document.getElementById('ready-subtitle');
         const loadingEl = document.getElementById('loading');
         const loadingText = document.getElementById('loading-text');
         const errorEl = document.getElementById('error');
@@ -168,13 +201,26 @@
         const errorCode = document.getElementById('error-code');
         const errorRetry = document.getElementById('error-retry');
 
+        // Localize the initial "Ready to cast" overlay copy. The HTML
+        // strings are placeholders for the default English render before
+        // JS runs; once we boot we replace them so the receiver respects
+        // STRINGS / LANG (future i18n).
+        readyTitleEl.textContent = t('readyTitle');
+        readySubtitleEl.textContent = t('readySubtitle');
+
         let hls = null;
 
         // Last LOAD request — kept for Retry and recovery diagnostics.
         let lastLoad = null;
 
+        function hideReady() {
+            readyEl.classList.add('hidden');
+        }
         function showLoading(text) {
             loadingText.textContent = text || t('loading');
+            // Any time we show a loading state, the idle/ready overlay
+            // is no longer relevant — hide it so we don't stack overlays.
+            hideReady();
             loadingEl.classList.remove('hidden');
         }
         function hideLoading() {
@@ -205,6 +251,7 @@
             errorRetry.textContent = t('retry');
             errorCode.textContent = codeLine || '';
             hideLoading();
+            hideReady();
             errorEl.classList.remove('hidden');
             // Try to focus Retry so a TV remote can press it without a tap.
             try { errorRetry.focus(); } catch (_) {}
