@@ -302,15 +302,24 @@
 
                 return new Promise((resolve) => {
                     let settled = false;
-                    const onReady = () => {
+                    // The <video> element's first `playing` event is the
+                    // definitive "TV has a frame on screen" signal, much
+                    // better than MANIFEST_PARSED (which fires before any
+                    // segment is buffered). Resolving here keeps the sender
+                    // showing "Loading" until the TV actually has video.
+                    const onFirstPlaying = () => {
                         if (settled) return;
                         settled = true;
-                        dbg('LOAD', 'ready → resolving CAF', 'ok');
+                        video.removeEventListener('playing', onFirstPlaying);
+                        dbg('LOAD', 'video PLAYING → resolving CAF', 'ok');
                         resolve(request);
                     };
+                    video.addEventListener('playing', onFirstPlaying);
+
                     const onFatal = (codeLine, kind) => {
                         if (settled) return;
                         settled = true;
+                        video.removeEventListener('playing', onFirstPlaying);
                         dbg('LOAD', `fatal → ${codeLine}`, 'err');
                         showError({ codeLine, kind });
                         // Tell CAF the load failed so the sender clears its
@@ -321,16 +330,24 @@
                         err.reason = cast.framework.messages.ErrorReason.GENERIC_LOAD_ERROR;
                         resolve(err);
                     };
-                    // Safety net: if hls.js / native never reach a definitive
-                    // state, resolve anyway so CAF doesn't hang forever. The
-                    // video element will keep trying in the background.
+                    // Safety net: if neither `playing` nor a fatal error
+                    // arrives, resolve optimistically so CAF doesn't hang
+                    // forever. The video element will keep trying behind it.
                     setTimeout(() => {
-                        if (!settled) {
-                            dbg('LOAD', 'no MANIFEST_PARSED in 15s — resolving optimistically', 'warn');
-                            onReady();
-                        }
+                        if (settled) return;
+                        settled = true;
+                        video.removeEventListener('playing', onFirstPlaying);
+                        dbg('LOAD', 'no PLAYING in 15s — resolving optimistically', 'warn');
+                        resolve(request);
                     }, 15000);
-                    startPlayback(url, startTime, contentType, { onReady, onFatal });
+                    // onReady from the engines is now informational only —
+                    // the actual CAF resolve happens on the video `playing`
+                    // event above. We pass an empty handler so the engine
+                    // signatures stay stable.
+                    startPlayback(url, startTime, contentType, {
+                        onReady: () => {},
+                        onFatal,
+                    });
                 });
             }
         );
