@@ -513,19 +513,32 @@
             cast.framework.messages.MessageType.SEEK,
             (message) => {
                 dbg('cmd', `SEEK → ${(message.currentTime || 0).toFixed(1)}s`);
+                // This is the only path that should label the overlay as
+                // "Seeking…". Anything else (initial startTime, glitch
+                // re-seeks) keeps the generic "Buffering…" copy.
+                isSeeking = true;
+                showLoading(t('seeking'));
+                if (seekSlowTimer) clearTimeout(seekSlowTimer);
+                seekSlowTimer = setTimeout(() => {
+                    if (isSeeking) showLoading(t('seekingSlow'));
+                }, SEEK_SLOW_THRESHOLD_MS);
                 return message;
             }
         );
 
         // ━━━━━━ Loading state ━━━━━━
         //
-        // Track whether we're mid-seek so the overlay shows "Seeking…"
-        // (clearer feedback when the user just jumped to a new position)
-        // instead of the generic "Buffering…". For large unsegmented files
-        // (.mkv / .mp4 from IPTV providers) the gap between `seeking` and
-        // `playing` can be 10-30 s while the receiver Range-fetches the
-        // new position from the server, so we also escalate the message
-        // to a "this may take a moment" copy after a few seconds.
+        // `isSeeking` is set ONLY by the SEEK message interceptor (i.e. the
+        // user explicitly moved the position from the sender). The video
+        // element's own `seeking` event also fires on internal seeks
+        // (applying startTime on initial LOAD, jumping after a buffer
+        // glitch, etc.) — those aren't real "user seeks" and shouldn't
+        // change the overlay copy.
+        //
+        // For large unsegmented files (.mkv / .mp4 from IPTV providers)
+        // a real seek can take 10-30 s while the receiver Range-fetches
+        // the new position; after 5 s we escalate to a "this may take a
+        // moment" copy so the user knows it isn't stuck.
         let isSeeking = false;
         let seekSlowTimer = null;
         const SEEK_SLOW_THRESHOLD_MS = 5000;
@@ -540,19 +553,15 @@
 
         video.addEventListener('seeking', () => {
             dbg('video', `seeking → ${video.currentTime.toFixed(1)}s`);
-            isSeeking = true;
-            showLoading(t('seeking'));
-            if (seekSlowTimer) clearTimeout(seekSlowTimer);
-            seekSlowTimer = setTimeout(() => {
-                if (isSeeking) showLoading(t('seekingSlow'));
-            }, SEEK_SLOW_THRESHOLD_MS);
+            // Don't touch isSeeking here — only the explicit SEEK
+            // interceptor below should drive the "Seeking…" overlay.
         });
 
         video.addEventListener('seeked', () => {
             dbg('video', 'seeked');
-            // `seeked` fires when the seek operation completes, but data may
-            // still be buffering. Keep `isSeeking` true until `playing` so
-            // any subsequent `waiting` event keeps the "Seeking…" label.
+            // `seeked` only means the browser's seek operation completed.
+            // Data may still be buffering, but isSeeking is owned by the
+            // SEEK interceptor and the matching `playing` event.
         });
 
         video.addEventListener('playing', () => {
