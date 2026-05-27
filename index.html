@@ -267,16 +267,23 @@
             }
         }
 
-        // ━━━━━━ LOAD interceptor ━━━━━━
+        // ━━━━━━ LOAD interceptor (IPTV-first router) ━━━━━━
         //
-        // We drive playback with hls.js (or native <video>) but resolve the
-        // LOAD promise with the request — NOT with null — once the media is
-        // ready. Resolving with the request makes CAF transition out of
-        // LOADING and start broadcasting real state to the sender, which is
-        // what enables PLAY/PAUSE/SEEK and currentTime updates to work.
+        // Engine routing:
+        //   * .m3u8 / mpegurl → hls.js (takes control of <video> via MSE)
+        //   * everything else (.mp4, .mkv, .mov, .ts catch-up…) → let CAF
+        //     assign video.src itself. We don't touch the element, just
+        //     attach listeners. This avoids the duplicate load that
+        //     happened when both we *and* CAF were setting video.src.
         //
-        // Resolving with an ErrorData lets CAF route the failure to the
-        // sender, so it knows to drop the cast session cleanly.
+        // LOAD promise resolution:
+        //   * HLS: resolved on the video element's first `playing` event.
+        //     hls.js drives playback via MSE; CAF doesn't re-load on top
+        //     of us so the "wait until real picture" UX is preserved.
+        //   * Native: resolved immediately with `request`. CAF then loads
+        //     the src itself, single-pass. The sender shows "casting" a
+        //     couple of seconds before the picture appears — the
+        //     trade-off for never restarting mid-load.
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.LOAD,
             (request) => {
@@ -287,8 +294,7 @@
                 cleanup();
                 hideError();
                 showLoading(t('loading'));
-                // Reset the debug log for each new LOAD so it shows only
-                // the current attempt.
+                // Reset the debug log so it shows only the current attempt.
                 dbgRows.length = 0;
                 renderDebug();
 
@@ -302,110 +308,107 @@
 
                 lastLoad = { url, startTime, contentType };
 
-                return new Promise((resolve) => {
-                    let settled = false;
-                    // The <video> element's first `playing` event is the
-                    // definitive "TV has a frame on screen" signal, much
-                    // better than MANIFEST_PARSED (which fires before any
-                    // segment is buffered). Resolving here keeps the sender
-                    // showing "Loading" until the TV actually has video.
-                    const onFirstPlaying = () => {
-                        if (settled) return;
-                        settled = true;
-                        video.removeEventListener('playing', onFirstPlaying);
-                        dbg('LOAD', 'video PLAYING → resolving CAF', 'ok');
-                        // Known limitation: resolving with the request lets
-                        // CAF re-assign video.src after this point, causing
-                        // a second metadata + playing pair. Cosmetic ~2-4s
-                        // extra on startup; the fix lives in the B refactor
-                        // (likely setMediaPlaybackInfoHandler).
-                        resolve(request);
-                    };
-                    video.addEventListener('playing', onFirstPlaying);
+                const isHls = url.includes('.m3u8') || contentType.includes('mpegurl');
 
-                    const onFatal = (codeLine, kind) => {
-                        if (settled) return;
-                        settled = true;
-                        video.removeEventListener('playing', onFirstPlaying);
-                        dbg('LOAD', `fatal → ${codeLine}`, 'err');
-                        showError({ codeLine, kind });
-                        // Tell CAF the load failed so the sender clears its
-                        // "casting" state instead of waiting forever.
-                        const err = new cast.framework.messages.ErrorData(
-                            cast.framework.messages.ErrorType.LOAD_FAILED
-                        );
-                        err.reason = cast.framework.messages.ErrorReason.GENERIC_LOAD_ERROR;
-                        resolve(err);
-                    };
-                    // Safety net: if neither `playing` nor a fatal error
-                    // arrives, resolve optimistically so CAF doesn't hang
-                    // forever. The video element will keep trying behind
-                    // it; common with .mkv VOD + startTime where Range
-                    // fetches to the seek position can take 20+ s.
-                    setTimeout(() => {
-                        if (settled) return;
-                        settled = true;
-                        video.removeEventListener('playing', onFirstPlaying);
-                        dbg('LOAD', 'no PLAYING in 25s — resolving optimistically', 'warn');
-                        resolve(request);
-                    }, 25000);
-                    // onReady from the engines is now informational only —
-                    // the actual CAF resolve happens on the video `playing`
-                    // event above.
-                    startPlayback(url, startTime, contentType, {
-                        onReady: () => {},
-                        onFatal,
-                    });
-                });
+                if (isHls && Hls.isSupported()) {
+                    dbg('engine', 'hls.js', 'ok');
+                    return loadWithHlsJs(request, url, startTime);
+                }
+                if (isHls && !Hls.isSupported() && video.canPlayType('application/vnd.apple.mpegurl')) {
+                    dbg('engine', 'native HLS', 'ok');
+                    return loadWithCafNative(request);
+                }
+                dbg('engine', `native (${sum.ext})`, 'ok');
+                return loadWithCafNative(request);
             }
         );
 
-        function startPlayback(url, startTime, contentType, cb) {
-            const isHls = url.includes('.m3u8') || contentType.includes('mpegurl');
-            if (isHls && Hls.isSupported()) {
-                dbg('engine', 'hls.js', 'ok');
-                tryHlsJs(url, startTime, cb, (errDetail) => {
-                    dbg('engine', `fallback to native (${errDetail})`, 'warn');
-                    // hls.js gave up — fall back to native <video>.
-                    showLoading(t('retrying'));
-                    attachNative(url, startTime, errDetail, cb);
-                });
-            } else if (isHls && !Hls.isSupported() && video.canPlayType('application/vnd.apple.mpegurl')) {
-                dbg('engine', 'native HLS', 'ok');
-                attachNative(url, startTime, null, cb);
-            } else {
-                dbg('engine', `native (${urlSummary(url).ext})`, 'ok');
-                attachNative(url, startTime, null, cb);
-            }
-        }
-
-        function attachNative(url, startTime, prevDetail, cb) {
-            video.src = url;
-            video.load();
+        // ━━━━━━ Native engine ━━━━━━
+        //
+        // CAF assigns video.src itself once we resolve. We only attach
+        // listeners for diagnostics and to surface MediaErrors with the
+        // codec/network split. The promise resolves right away — there's
+        // nothing for us to "wait for" since CAF owns the load.
+        function loadWithCafNative(request) {
+            // Track whether the container parsed (loadedmetadata) before
+            // any error — used to label MediaError code 3/4 as a codec
+            // problem rather than a network one.
             let metadataSeen = false;
-            video.addEventListener('loadedmetadata', () => {
+            const onMeta = () => {
                 metadataSeen = true;
-                if (startTime > 0) video.currentTime = startTime;
-                cb && cb.onReady && cb.onReady();
-            }, { once: true });
-            const onNativeError = () => {
-                video.removeEventListener('error', onNativeError);
-                const code = video.error ? video.error.code : 0;
-                const map = { 1: 'ABORTED', 2: 'NETWORK', 3: 'DECODE', 4: 'SRC_NOT_SUPPORTED' };
-                const kind = map[code] || 'UNKNOWN';
-                const msg = video.error && video.error.message ? ` "${video.error.message}"` : '';
-                dbg('native', `MediaError code=${code} ${kind}${msg}`, 'err');
-                const detail = prevDetail ? `${prevDetail} → ${kind}` : `MEDIA_ERROR · ${kind}`;
-                // Codec-mismatch signature: header parsed (we saw metadata)
-                // but the pipeline still rejected the source.
-                const isCodecError = metadataSeen && (code === 3 || code === 4);
-                cb && cb.onFatal && cb.onFatal(detail, isCodecError ? 'codec' : undefined);
+                video.removeEventListener('loadedmetadata', onMeta);
             };
-            video.addEventListener('error', onNativeError);
-            video.play().catch((e) => dbg('native', `play() rejected: ${e.message || e}`, 'warn'));
+            const onError = () => {
+                video.removeEventListener('error', onError);
+                video.removeEventListener('loadedmetadata', onMeta);
+                const code = video.error ? video.error.code : 0;
+                const map = {
+                    1: 'ABORTED', 2: 'NETWORK', 3: 'DECODE', 4: 'SRC_NOT_SUPPORTED',
+                };
+                const kind = map[code] || 'UNKNOWN';
+                const msg = video.error && video.error.message
+                    ? ` "${video.error.message}"` : '';
+                dbg('native', `MediaError code=${code} ${kind}${msg}`, 'err');
+                const isCodecError = metadataSeen && (code === 3 || code === 4);
+                showError({
+                    codeLine: `MEDIA_ERROR · ${kind}`,
+                    kind: isCodecError ? 'codec' : undefined,
+                });
+            };
+            video.addEventListener('loadedmetadata', onMeta, { once: true });
+            video.addEventListener('error', onError);
+            // Resolve immediately — CAF takes it from here.
+            dbg('LOAD', 'native: resolving CAF (CAF will load src)', 'ok');
+            return Promise.resolve(request);
         }
 
-        function tryHlsJs(url, startTime, cb, onFail) {
+        // ━━━━━━ HLS engine (hls.js via MSE) ━━━━━━
+        //
+        // hls.js owns the <video> element through MSE; CAF doesn't
+        // re-assign video.src on top of us, so we can safely wait for
+        // the first `playing` event before resolving — the sender then
+        // shows "casting" only when there's a real frame on screen.
+        function loadWithHlsJs(request, url, startTime) {
+            return new Promise((resolve) => {
+                let settled = false;
+                const onFirstPlaying = () => {
+                    if (settled) return;
+                    settled = true;
+                    video.removeEventListener('playing', onFirstPlaying);
+                    dbg('LOAD', 'video PLAYING → resolving CAF', 'ok');
+                    resolve(request);
+                };
+                video.addEventListener('playing', onFirstPlaying);
+
+                const onFatal = (codeLine, kind) => {
+                    if (settled) return;
+                    settled = true;
+                    video.removeEventListener('playing', onFirstPlaying);
+                    dbg('LOAD', `fatal → ${codeLine}`, 'err');
+                    showError({ codeLine, kind });
+                    const err = new cast.framework.messages.ErrorData(
+                        cast.framework.messages.ErrorType.LOAD_FAILED
+                    );
+                    err.reason = cast.framework.messages.ErrorReason.GENERIC_LOAD_ERROR;
+                    resolve(err);
+                };
+
+                // Safety net: if hls.js never fires MANIFEST_PARSED or the
+                // video never reaches `playing`, resolve optimistically so
+                // CAF doesn't hang forever.
+                setTimeout(() => {
+                    if (settled) return;
+                    settled = true;
+                    video.removeEventListener('playing', onFirstPlaying);
+                    dbg('LOAD', 'no PLAYING in 20s — resolving optimistically', 'warn');
+                    resolve(request);
+                }, 20000);
+
+                tryHlsJs(url, startTime, onFatal);
+            });
+        }
+
+        function tryHlsJs(url, startTime, onFatal) {
             let failed = false;
             const recovered = { media: false, network: false };
 
@@ -430,8 +433,6 @@
                 showLoading(t('buffering'));
                 if (startTime > 0) video.currentTime = startTime;
                 video.play().catch((e) => dbg('hls', `play() rejected: ${e.message || e}`, 'warn'));
-                // Tell CAF we're good to go.
-                cb && cb.onReady && cb.onReady();
             });
 
             hls.on(Hls.Events.LEVEL_SWITCHED, (e, data) => {
@@ -480,7 +481,7 @@
                         httpStatus ? `HTTP ${httpStatus}` : null,
                     ].filter(Boolean).join(' · ');
                     hls.destroy(); hls = null;
-                    if (onFail) onFail(detail);
+                    if (onFatal) onFatal(detail);
                 }
             });
 
@@ -596,13 +597,35 @@
         });
 
         // ━━━━━━ Retry ━━━━━━
+        //
+        // The on-TV Retry button replays the last LOAD locally. We don't
+        // bounce it through CAF — that's already considered the load
+        // "successful". The flow mirrors the LOAD interceptor's engine
+        // router: HLS via hls.js, anything else via direct video.src.
         errorRetry.addEventListener('click', () => {
             if (!lastLoad) return;
             dbg('retry', 'user pressed Retry');
             hideError();
             cleanup();
             showLoading(t('retrying'));
-            startPlayback(lastLoad.url, lastLoad.startTime, lastLoad.contentType);
+            const { url, startTime, contentType } = lastLoad;
+            const isHls = url.includes('.m3u8') || (contentType || '').includes('mpegurl');
+            if (isHls && Hls.isSupported()) {
+                tryHlsJs(url, startTime, (codeLine, kind) => {
+                    showError({ codeLine, kind });
+                });
+            } else {
+                // For native, set the src directly — CAF isn't in the loop
+                // for retries so there's no risk of a duplicate load here.
+                video.src = url;
+                video.load();
+                if (startTime > 0) {
+                    video.addEventListener('loadedmetadata', () => {
+                        video.currentTime = startTime;
+                    }, { once: true });
+                }
+                video.play().catch((e) => dbg('native', `play() rejected: ${e.message || e}`, 'warn'));
+            }
         });
 
         // ━━━━━━ Start ━━━━━━
