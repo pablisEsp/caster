@@ -267,11 +267,14 @@
 
         // ━━━━━━ LOAD interceptor ━━━━━━
         //
-        // We drive playback ourselves (hls.js or native <video>) and resolve
-        // with `null` so CAF doesn't fight us with its default pipeline.
-        // Resolving `null` also stops CAF from broadcasting request.media to
-        // the sender, so we propagate metadata explicitly via setMediaInformation().
-        // Without that call, the sender's mini controller only sees the URL.
+        // We drive playback with hls.js (or native <video>) but resolve the
+        // LOAD promise with the request — NOT with null — once the media is
+        // ready. Resolving with the request makes CAF transition out of
+        // LOADING and start broadcasting real state to the sender, which is
+        // what enables PLAY/PAUSE/SEEK and currentTime updates to work.
+        //
+        // Resolving with an ErrorData lets CAF route the failure to the
+        // sender, so it knows to drop the cast session cleanly.
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.LOAD,
             (request) => {
@@ -295,47 +298,71 @@
                 const sum = urlSummary(url);
                 dbg('LOAD', `${sum.host} ${sum.ext} ct=${contentType || '-'} t=${startTime}s`);
 
-                // Push title / images / streamType to the sender.
-                playerManager.setMediaInformation(request.media, /*opt_broadcast=*/true);
-
                 lastLoad = { url, startTime, contentType };
-                startPlayback(url, startTime, contentType);
-                return new Promise((resolve) => resolve(null));
+
+                return new Promise((resolve) => {
+                    let settled = false;
+                    const onReady = () => {
+                        if (settled) return;
+                        settled = true;
+                        dbg('LOAD', 'ready → resolving CAF', 'ok');
+                        resolve(request);
+                    };
+                    const onFatal = (codeLine, kind) => {
+                        if (settled) return;
+                        settled = true;
+                        dbg('LOAD', `fatal → ${codeLine}`, 'err');
+                        showError({ codeLine, kind });
+                        // Tell CAF the load failed so the sender clears its
+                        // "casting" state instead of waiting forever.
+                        const err = new cast.framework.messages.ErrorData(
+                            cast.framework.messages.ErrorType.LOAD_FAILED
+                        );
+                        err.reason = cast.framework.messages.ErrorReason.GENERIC_LOAD_ERROR;
+                        resolve(err);
+                    };
+                    // Safety net: if hls.js / native never reach a definitive
+                    // state, resolve anyway so CAF doesn't hang forever. The
+                    // video element will keep trying in the background.
+                    setTimeout(() => {
+                        if (!settled) {
+                            dbg('LOAD', 'no MANIFEST_PARSED in 15s — resolving optimistically', 'warn');
+                            onReady();
+                        }
+                    }, 15000);
+                    startPlayback(url, startTime, contentType, { onReady, onFatal });
+                });
             }
         );
 
-        function startPlayback(url, startTime, contentType) {
+        function startPlayback(url, startTime, contentType, cb) {
             const isHls = url.includes('.m3u8') || contentType.includes('mpegurl');
             if (isHls && Hls.isSupported()) {
                 dbg('engine', 'hls.js', 'ok');
-                tryHlsJs(url, startTime, (errDetail) => {
+                tryHlsJs(url, startTime, cb, (errDetail) => {
                     dbg('engine', `fallback to native (${errDetail})`, 'warn');
                     // hls.js gave up — fall back to native <video>.
                     showLoading(t('retrying'));
-                    attachNative(url, startTime, errDetail);
+                    attachNative(url, startTime, errDetail, cb);
                 });
             } else if (isHls && !Hls.isSupported() && video.canPlayType('application/vnd.apple.mpegurl')) {
                 dbg('engine', 'native HLS', 'ok');
-                attachNative(url, startTime, null);
+                attachNative(url, startTime, null, cb);
             } else {
                 dbg('engine', `native (${urlSummary(url).ext})`, 'ok');
-                attachNative(url, startTime, null);
+                attachNative(url, startTime, null, cb);
             }
         }
 
-        function attachNative(url, startTime, prevDetail) {
+        function attachNative(url, startTime, prevDetail, cb) {
             video.src = url;
             video.load();
-            // Track whether the container was successfully parsed. If we see
-            // `loadedmetadata` and then later get a MediaError, the failure
-            // is almost certainly the codec rather than the URL / network.
             let metadataSeen = false;
             video.addEventListener('loadedmetadata', () => {
                 metadataSeen = true;
                 if (startTime > 0) video.currentTime = startTime;
+                cb && cb.onReady && cb.onReady();
             }, { once: true });
-            // Catch native MediaElement errors — these are the only signal
-            // we get when the native fallback also fails.
             const onNativeError = () => {
                 video.removeEventListener('error', onNativeError);
                 const code = video.error ? video.error.code : 0;
@@ -345,22 +372,16 @@
                 dbg('native', `MediaError code=${code} ${kind}${msg}`, 'err');
                 const detail = prevDetail ? `${prevDetail} → ${kind}` : `MEDIA_ERROR · ${kind}`;
                 // Codec-mismatch signature: header parsed (we saw metadata)
-                // but the pipeline still rejected the source. Surface a
-                // clearer "codec not supported" message instead of the
-                // generic network one.
+                // but the pipeline still rejected the source.
                 const isCodecError = metadataSeen && (code === 3 || code === 4);
-                showError({
-                    codeLine: detail,
-                    kind: isCodecError ? 'codec' : undefined,
-                });
+                cb && cb.onFatal && cb.onFatal(detail, isCodecError ? 'codec' : undefined);
             };
             video.addEventListener('error', onNativeError);
             video.play().catch((e) => dbg('native', `play() rejected: ${e.message || e}`, 'warn'));
         }
 
-        function tryHlsJs(url, startTime, onFail) {
+        function tryHlsJs(url, startTime, cb, onFail) {
             let failed = false;
-            // Each kind of recovery is attempted once; further failures escalate.
             const recovered = { media: false, network: false };
 
             hls = new Hls({
@@ -384,6 +405,8 @@
                 showLoading(t('buffering'));
                 if (startTime > 0) video.currentTime = startTime;
                 video.play().catch((e) => dbg('hls', `play() rejected: ${e.message || e}`, 'warn'));
+                // Tell CAF we're good to go.
+                cb && cb.onReady && cb.onReady();
             });
 
             hls.on(Hls.Events.LEVEL_SWITCHED, (e, data) => {
@@ -440,6 +463,41 @@
             hls.attachMedia(video);
         }
 
+        // ━━━━━━ PLAY / PAUSE interceptors ━━━━━━
+        //
+        // CAF would normally route PLAY/PAUSE to its internal player, but we
+        // told it to skip loading those (skipPlayersLoad), so we drive the
+        // <video> element directly and then broadcastStatus(true) so the
+        // sender sees the transition. SEEK doesn't need an interceptor —
+        // CAF maps it to videoElement.currentTime out of the box once the
+        // session has transitioned out of LOADING.
+        const changePlaybackStatus = (shouldPlay) => (message) => {
+            if (shouldPlay) {
+                video.play().catch((e) => dbg('cmd', `play() rejected: ${e.message || e}`, 'warn'));
+                dbg('cmd', 'PLAY');
+            } else {
+                video.pause();
+                dbg('cmd', 'PAUSE');
+            }
+            playerManager.broadcastStatus(true);
+            return message;
+        };
+        playerManager.setMessageInterceptor(
+            cast.framework.messages.MessageType.PLAY,
+            changePlaybackStatus(true)
+        );
+        playerManager.setMessageInterceptor(
+            cast.framework.messages.MessageType.PAUSE,
+            changePlaybackStatus(false)
+        );
+        playerManager.setMessageInterceptor(
+            cast.framework.messages.MessageType.SEEK,
+            (message) => {
+                dbg('cmd', `SEEK → ${(message.currentTime || 0).toFixed(1)}s`);
+                return message;
+            }
+        );
+
         // ━━━━━━ Loading state ━━━━━━
         video.addEventListener('playing', () => {
             const w = video.videoWidth || 0;
@@ -477,7 +535,15 @@
 
         // ━━━━━━ Start ━━━━━━
         const options = new cast.framework.CastReceiverOptions();
+        // Don't fetch Shaka / MPL — we use hls.js for HLS and the native
+        // <video> for everything else. Saves a download on startup and
+        // prevents CAF from racing us for the media element.
+        options.skipPlayersLoad = true;
         options.disableIdleTimeout = true;
+        // Advertise the full set of basic transport commands so the sender
+        // shows play/pause/seek buttons. Without this CAF reports an empty
+        // supportedCommands mask and the sender greys out the controls.
+        options.supportedCommands = cast.framework.messages.Command.ALL_BASIC_MEDIA;
         options.mediaElement = video;
         context.start(options);
         dbg('ready', 'receiver started', 'ok');
