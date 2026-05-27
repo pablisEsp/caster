@@ -143,6 +143,8 @@
                 loading: 'Loading...',
                 buffering: 'Buffering...',
                 retrying: 'Retrying...',
+                seeking: 'Seeking…',
+                seekingSlow: 'Seeking — this may take a moment',
                 errorTitle: 'Stream unavailable',
                 errorSubtitle: "The provider's server isn't responding. This isn't an app issue — try another channel or check back later.",
                 codecTitle: 'This Chromecast can\'t play that codec',
@@ -516,18 +518,56 @@
         );
 
         // ━━━━━━ Loading state ━━━━━━
+        //
+        // Track whether we're mid-seek so the overlay shows "Seeking…"
+        // (clearer feedback when the user just jumped to a new position)
+        // instead of the generic "Buffering…". For large unsegmented files
+        // (.mkv / .mp4 from IPTV providers) the gap between `seeking` and
+        // `playing` can be 10-30 s while the receiver Range-fetches the
+        // new position from the server, so we also escalate the message
+        // to a "this may take a moment" copy after a few seconds.
+        let isSeeking = false;
+        let seekSlowTimer = null;
+        const SEEK_SLOW_THRESHOLD_MS = 5000;
+
+        function clearSeekState() {
+            isSeeking = false;
+            if (seekSlowTimer) {
+                clearTimeout(seekSlowTimer);
+                seekSlowTimer = null;
+            }
+        }
+
+        video.addEventListener('seeking', () => {
+            dbg('video', `seeking → ${video.currentTime.toFixed(1)}s`);
+            isSeeking = true;
+            showLoading(t('seeking'));
+            if (seekSlowTimer) clearTimeout(seekSlowTimer);
+            seekSlowTimer = setTimeout(() => {
+                if (isSeeking) showLoading(t('seekingSlow'));
+            }, SEEK_SLOW_THRESHOLD_MS);
+        });
+
+        video.addEventListener('seeked', () => {
+            dbg('video', 'seeked');
+            // `seeked` fires when the seek operation completes, but data may
+            // still be buffering. Keep `isSeeking` true until `playing` so
+            // any subsequent `waiting` event keeps the "Seeking…" label.
+        });
+
         video.addEventListener('playing', () => {
             const w = video.videoWidth || 0;
             const h = video.videoHeight || 0;
             const dur = isFinite(video.duration) ? video.duration.toFixed(0) + 's' : 'live';
             dbg('video', `PLAYING ${w}x${h} dur=${dur}`, 'ok');
+            clearSeekState();
             hideError();
             hideLoading();
             hideDebugSoon();
         });
         video.addEventListener('waiting', () => {
             dbg('video', 'waiting (buffering)', 'warn');
-            showLoading(t('buffering'));
+            showLoading(t(isSeeking ? 'seeking' : 'buffering'));
         });
         video.addEventListener('canplay', () => {
             dbg('video', 'canplay');
