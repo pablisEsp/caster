@@ -445,12 +445,14 @@
                     (httpStatus ? ` · HTTP ${httpStatus}` : '') +
                     (data.fatal ? ' · FATAL' : '');
                 if (!data.fatal) {
+                    // bufferStalledError is emitted as MEDIA_ERROR in hls.js,
+                    // not NETWORK_ERROR. Use `details` alone so we actually
+                    // trigger the startLoad() recovery.
                     if (
-                        data.type === Hls.ErrorTypes.NETWORK_ERROR &&
                         data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR &&
-                        !recovered.network
+                        !recovered.stall
                     ) {
-                        recovered.network = true;
+                        recovered.stall = true;
                         dbg('recover', `${summary} → startLoad()`, 'warn');
                         hls.startLoad();
                     } else {
