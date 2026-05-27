@@ -67,6 +67,48 @@
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
             letter-spacing: 0.5px;
         }
+
+        /* ━━━━━━ Debug panel ━━━━━━ */
+        /* Discreet rolling log in the top-right corner. Hidden by default;
+           shows itself when an event is logged and auto-fades when the
+           stream reaches PLAYING. Always visible (regardless of state) if
+           the receiver URL has ?debug=1. */
+        #debug {
+            position: absolute; top: 16px; right: 16px;
+            width: 380px; max-height: 60vh;
+            background: rgba(0, 0, 0, 0.7);
+            color: rgba(255, 255, 255, 0.85);
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 11px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            z-index: 300;
+            overflow: hidden;
+            transition: opacity 0.4s ease;
+            pointer-events: none;
+        }
+        #debug.hidden { opacity: 0; }
+        #debug-head {
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 10px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }
+        #debug-list { line-height: 1.45; }
+        #debug-list .dbg-row { white-space: pre-wrap; word-break: break-all; }
+        .dbg-row.err { color: #ff8a8a; }
+        .dbg-row.warn { color: #ffd28a; }
+        .dbg-row.ok { color: #9ae6b4; }
+        .dbg-tag {
+            display: inline-block;
+            background: rgba(255, 255, 255, 0.1);
+            color: rgba(255, 255, 255, 0.7);
+            padding: 0 4px;
+            border-radius: 3px;
+            margin-right: 4px;
+        }
     </style>
 </head>
 <body>
@@ -82,6 +124,10 @@
         <div id="error-subtitle">The provider's server isn't responding. This isn't an app issue — try another channel or check back later.</div>
         <button id="error-retry">Retry</button>
         <div id="error-code"></div>
+    </div>
+    <div id="debug" class="hidden">
+        <div id="debug-head">debug</div>
+        <div id="debug-list"></div>
     </div>
     <video id="media" autoplay></video>
 
@@ -140,6 +186,58 @@
             errorEl.classList.add('hidden');
         }
 
+        // ━━━━━━ Debug panel ━━━━━━
+        //
+        // dbg(tag, msg, level?) — level ∈ {ok, warn, err, info (default)}.
+        // The panel appears as soon as anything is logged. If playback
+        // reaches PLAYING it auto-fades unless ?debug=1 forces it visible.
+        const DEBUG_ALWAYS_VISIBLE = (() => {
+            try {
+                return new URLSearchParams(location.search).get('debug') === '1';
+            } catch (_) { return false; }
+        })();
+        const debugEl = document.getElementById('debug');
+        const debugList = document.getElementById('debug-list');
+        const DBG_MAX_ROWS = 30;
+        const dbgRows = [];
+
+        function dbg(tag, msg, level) {
+            const now = new Date();
+            const time = now.toTimeString().slice(0, 8) + '.' +
+                String(now.getMilliseconds()).padStart(3, '0');
+            const row = { time, tag, msg, level: level || 'info' };
+            dbgRows.push(row);
+            if (dbgRows.length > DBG_MAX_ROWS) dbgRows.shift();
+            renderDebug();
+            debugEl.classList.remove('hidden');
+        }
+
+        function renderDebug() {
+            const html = dbgRows.map((r) => {
+                const cls = r.level === 'info' ? '' : ` ${r.level}`;
+                const safe = (s) => String(s)
+                    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                return `<div class="dbg-row${cls}">` +
+                    `<span style="color:rgba(255,255,255,0.4)">${r.time}</span> ` +
+                    `<span class="dbg-tag">${safe(r.tag)}</span>` +
+                    `${safe(r.msg)}</div>`;
+            }).join('');
+            debugList.innerHTML = html;
+        }
+
+        function hideDebugSoon() {
+            if (DEBUG_ALWAYS_VISIBLE) return;
+            // Give the eye a couple of seconds to read the last events,
+            // then quietly fade the panel out.
+            setTimeout(() => debugEl.classList.add('hidden'), 2500);
+        }
+
+        // Mirror console errors to the debug panel so any uncaught JS lands
+        // in the rolling log too.
+        window.addEventListener('error', (ev) => {
+            dbg('jserr', `${ev.message} @ ${ev.filename}:${ev.lineno}`, 'err');
+        });
+
         const context = cast.framework.CastReceiverContext.getInstance();
         const playerManager = context.getPlayerManager();
 
@@ -147,6 +245,18 @@
             if (hls) { hls.destroy(); hls = null; }
             video.removeAttribute('src');
             video.load();
+        }
+
+        // Brief stream summary: container, file size hint from URL, codecs
+        // exposed by the video element once metadata loads.
+        function urlSummary(url) {
+            try {
+                const u = new URL(url);
+                const ext = (u.pathname.match(/\.[a-z0-9]{2,5}$/i) || ['?'])[0];
+                return { host: u.host, ext: ext.toLowerCase(), path: u.pathname };
+            } catch (_) {
+                return { host: '?', ext: '?', path: '' };
+            }
         }
 
         // ━━━━━━ LOAD interceptor ━━━━━━
@@ -166,8 +276,18 @@
                 cleanup();
                 hideError();
                 showLoading(t('loading'));
+                // Reset the debug log for each new LOAD so it shows only
+                // the current attempt.
+                dbgRows.length = 0;
+                renderDebug();
 
-                if (!url) return request;
+                if (!url) {
+                    dbg('LOAD', 'request had no URL', 'err');
+                    return request;
+                }
+
+                const sum = urlSummary(url);
+                dbg('LOAD', `${sum.host} ${sum.ext} ct=${contentType || '-'} t=${startTime}s`);
 
                 // Push title / images / streamType to the sender.
                 playerManager.setMediaInformation(request.media, /*opt_broadcast=*/true);
@@ -181,14 +301,18 @@
         function startPlayback(url, startTime, contentType) {
             const isHls = url.includes('.m3u8') || contentType.includes('mpegurl');
             if (isHls && Hls.isSupported()) {
+                dbg('engine', 'hls.js', 'ok');
                 tryHlsJs(url, startTime, (errDetail) => {
+                    dbg('engine', `fallback to native (${errDetail})`, 'warn');
                     // hls.js gave up — fall back to native <video>.
                     showLoading(t('retrying'));
                     attachNative(url, startTime, errDetail);
                 });
             } else if (isHls && !Hls.isSupported() && video.canPlayType('application/vnd.apple.mpegurl')) {
+                dbg('engine', 'native HLS', 'ok');
                 attachNative(url, startTime, null);
             } else {
+                dbg('engine', `native (${urlSummary(url).ext})`, 'ok');
                 attachNative(url, startTime, null);
             }
         }
@@ -208,11 +332,13 @@
                 const code = video.error ? video.error.code : 0;
                 const map = { 1: 'ABORTED', 2: 'NETWORK', 3: 'DECODE', 4: 'SRC_NOT_SUPPORTED' };
                 const kind = map[code] || 'UNKNOWN';
+                const msg = video.error && video.error.message ? ` "${video.error.message}"` : '';
+                dbg('native', `MediaError code=${code} ${kind}${msg}`, 'err');
                 const detail = prevDetail ? `${prevDetail} → ${kind}` : `MEDIA_ERROR · ${kind}`;
                 showError({ codeLine: detail });
             };
             video.addEventListener('error', onNativeError);
-            video.play().catch(() => {});
+            video.play().catch((e) => dbg('native', `play() rejected: ${e.message || e}`, 'warn'));
         }
 
         function tryHlsJs(url, startTime, onFail) {
@@ -229,41 +355,60 @@
                 fragLoadingRetryDelay: 1000, manifestLoadingTimeOut: 10000,
             });
 
-            hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            hls.on(Hls.Events.MANIFEST_PARSED, (e, data) => {
+                const levels = (data && data.levels) || [];
+                const summary = levels.map((l) => {
+                    const codecs = [l.videoCodec, l.audioCodec].filter(Boolean).join('+');
+                    const res = (l.width && l.height) ? `${l.width}x${l.height}` : '?';
+                    const br = l.bitrate ? `${Math.round(l.bitrate / 1000)}k` : '?';
+                    return `${res}@${br}[${codecs || '?'}]`;
+                }).slice(0, 4).join(' ');
+                dbg('manifest', `${levels.length} level(s): ${summary || '(none)'}`, 'ok');
                 showLoading(t('buffering'));
                 if (startTime > 0) video.currentTime = startTime;
-                video.play().catch(() => {});
+                video.play().catch((e) => dbg('hls', `play() rejected: ${e.message || e}`, 'warn'));
+            });
+
+            hls.on(Hls.Events.LEVEL_SWITCHED, (e, data) => {
+                dbg('hls', `level → ${data.level}`);
             });
 
             hls.on(Hls.Events.ERROR, (e, data) => {
+                const httpStatus = data && data.response && data.response.code;
+                const summary = `${data.type || '?'} · ${data.details || '?'}` +
+                    (httpStatus ? ` · HTTP ${httpStatus}` : '') +
+                    (data.fatal ? ' · FATAL' : '');
                 if (!data.fatal) {
-                    // Transient stall: ask hls.js to resume fetching once.
                     if (
                         data.type === Hls.ErrorTypes.NETWORK_ERROR &&
                         data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR &&
                         !recovered.network
                     ) {
                         recovered.network = true;
+                        dbg('recover', `${summary} → startLoad()`, 'warn');
                         hls.startLoad();
+                    } else {
+                        dbg('hls', summary, 'warn');
                     }
                     return;
                 }
 
-                // One recovery attempt per category before giving up.
                 if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered.media) {
                     recovered.media = true;
+                    dbg('recover', `${summary} → recoverMediaError()`, 'warn');
                     hls.recoverMediaError();
                     return;
                 }
                 if (data.type === Hls.ErrorTypes.NETWORK_ERROR && !recovered.network) {
                     recovered.network = true;
+                    dbg('recover', `${summary} → startLoad()`, 'warn');
                     hls.startLoad();
                     return;
                 }
 
                 if (!failed) {
                     failed = true;
-                    const httpStatus = data?.response?.code;
+                    dbg('hls', `giving up: ${summary}`, 'err');
                     const detail = [
                         (data.type || 'ERROR').replace('Error', '').toUpperCase(),
                         data.details || 'unknown',
@@ -280,17 +425,33 @@
 
         // ━━━━━━ Loading state ━━━━━━
         video.addEventListener('playing', () => {
+            const w = video.videoWidth || 0;
+            const h = video.videoHeight || 0;
+            const dur = isFinite(video.duration) ? video.duration.toFixed(0) + 's' : 'live';
+            dbg('video', `PLAYING ${w}x${h} dur=${dur}`, 'ok');
             hideError();
             hideLoading();
+            hideDebugSoon();
         });
-        video.addEventListener('waiting', () => showLoading(t('buffering')));
+        video.addEventListener('waiting', () => {
+            dbg('video', 'waiting (buffering)', 'warn');
+            showLoading(t('buffering'));
+        });
         video.addEventListener('canplay', () => {
+            dbg('video', 'canplay');
             setTimeout(() => { if (!video.paused) hideLoading(); }, 300);
+        });
+        video.addEventListener('stalled', () => dbg('video', 'stalled', 'warn'));
+        video.addEventListener('loadedmetadata', () => {
+            const w = video.videoWidth || 0;
+            const h = video.videoHeight || 0;
+            dbg('video', `metadata ${w}x${h}`);
         });
 
         // ━━━━━━ Retry ━━━━━━
         errorRetry.addEventListener('click', () => {
             if (!lastLoad) return;
+            dbg('retry', 'user pressed Retry');
             hideError();
             cleanup();
             showLoading(t('retrying'));
@@ -302,6 +463,8 @@
         options.disableIdleTimeout = true;
         options.mediaElement = video;
         context.start(options);
+        dbg('ready', 'receiver started', 'ok');
+        if (!DEBUG_ALWAYS_VISIBLE) hideDebugSoon();
     </script>
 </body>
 </html>
