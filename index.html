@@ -148,8 +148,12 @@
                 seekingStuck: 'Seek is taking too long — the server may not support this position. Try a different moment or stop casting.',
                 errorTitle: 'Stream unavailable',
                 errorSubtitle: "The provider's server isn't responding. This isn't an app issue — try another channel or check back later.",
-                codecTitle: 'This Chromecast can\'t play that codec',
+                codecTitle: "This Chromecast can't play that codec",
                 codecSubtitle: "Your Chromecast doesn't support the video / audio codec inside this file (often HEVC, AV1 or EAC3). Try a different release or use a newer Chromecast model.",
+                rateLimitTitle: 'Provider is rate-limiting',
+                rateLimitSubtitle: "Your IPTV provider blocked too many requests at once. Wait a few minutes and try again, or use a different channel.",
+                serverErrorTitle: "The provider's server is having issues",
+                serverErrorSubtitle: "The IPTV server returned a 5xx error. It's likely overloaded or down. Not an app issue — try again in a moment.",
                 retry: 'Retry',
             },
         };
@@ -178,12 +182,26 @@
         }
 
         function showError({ codeLine, kind }) {
-            // `kind` lets callers pick a more specific copy:
-            //   'codec'   → "This Chromecast can't play that codec"
-            //   default  → generic "Stream unavailable"
-            const isCodec = kind === 'codec';
-            errorTitle.textContent = t(isCodec ? 'codecTitle' : 'errorTitle');
-            errorSubtitle.textContent = t(isCodec ? 'codecSubtitle' : 'errorSubtitle');
+            // `kind` lets callers pick a more specific copy. Falls back
+            // to the generic "Stream unavailable" message.
+            //   'codec'       → unsupported codec inside the container
+            //   'rateLimit'   → HTTP 429 / 509 from the provider
+            //   'serverError' → other HTTP 5xx from the provider
+            //   default       → generic network failure
+            const titleKey = (
+                kind === 'codec' ? 'codecTitle' :
+                kind === 'rateLimit' ? 'rateLimitTitle' :
+                kind === 'serverError' ? 'serverErrorTitle' :
+                'errorTitle'
+            );
+            const subtitleKey = (
+                kind === 'codec' ? 'codecSubtitle' :
+                kind === 'rateLimit' ? 'rateLimitSubtitle' :
+                kind === 'serverError' ? 'serverErrorSubtitle' :
+                'errorSubtitle'
+            );
+            errorTitle.textContent = t(titleKey);
+            errorSubtitle.textContent = t(subtitleKey);
             errorRetry.textContent = t('retry');
             errorCode.textContent = codeLine || '';
             hideLoading();
@@ -497,8 +515,18 @@
                         data.details || 'unknown',
                         httpStatus ? `HTTP ${httpStatus}` : null,
                     ].filter(Boolean).join(' · ');
+                    // Map HTTP status to a more specific overlay copy.
+                    // 429 / 509 mean the provider blocked us for too
+                    // many requests; other 5xx mean their server is
+                    // returning an error itself.
+                    let kind;
+                    if (httpStatus === 429 || httpStatus === 509) {
+                        kind = 'rateLimit';
+                    } else if (httpStatus >= 500 && httpStatus < 600) {
+                        kind = 'serverError';
+                    }
                     hls.destroy(); hls = null;
-                    if (onFatal) onFatal(detail);
+                    if (onFatal) onFatal(detail, kind);
                 }
             });
 
