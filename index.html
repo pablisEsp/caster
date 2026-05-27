@@ -382,11 +382,25 @@
                 video.addEventListener('playing', onFirstPlaying);
 
                 const onFatal = (codeLine, kind) => {
+                    // Show the on-TV error overlay in BOTH cases:
+                    //   * Pre-settled (load never succeeded): also bubble
+                    //     a LOAD_FAILED back to CAF so the sender clears
+                    //     its "casting" state.
+                    //   * Post-settled (in-session failure, e.g. provider
+                    //     returns HTTP 509 mid-playback and hls.js gives
+                    //     up): the cast session is still open, but the
+                    //     stream is dead. The sender doesn't have a clean
+                    //     signal for this — but the user at least sees
+                    //     what went wrong on the TV.
+                    dbg(
+                        settled ? 'in-session' : 'LOAD',
+                        `fatal → ${codeLine}`,
+                        'err',
+                    );
+                    showError({ codeLine, kind });
                     if (settled) return;
                     settled = true;
                     video.removeEventListener('playing', onFirstPlaying);
-                    dbg('LOAD', `fatal → ${codeLine}`, 'err');
-                    showError({ codeLine, kind });
                     const err = new cast.framework.messages.ErrorData(
                         cast.framework.messages.ErrorType.LOAD_FAILED
                     );
