@@ -842,6 +842,15 @@
             // `seeked` only means the browser's seek operation completed.
             // Data may still be buffering, but isSeeking is owned by the
             // SEEK interceptor and the matching `playing` event.
+            //
+            // seekV2: a seek made while PAUSED never produces `playing`, so
+            // the "Seeking…" overlay used to stay up (and escalate to "taking
+            // too long") until the user pressed play. Settle it here instead.
+            if (feature('seekV2') && video.paused && isSeeking) {
+                dbg('video', 'seeked while paused → clearing seek overlay');
+                clearSeekState();
+                hideLoading();
+            }
         });
 
         video.addEventListener('playing', () => {
