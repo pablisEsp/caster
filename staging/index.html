@@ -269,6 +269,94 @@
                 : 'legacy sender (no customData)');
         }
 
+        // ━━━━━━ Start-position verification (feature: resumeV2) ━━━━━━
+        //
+        // Legacy behaviour: the HLS path sets video.currentTime once on
+        // MANIFEST_PARSED; the native path trusts CAF to apply
+        // LoadRequestData.currentTime. Neither checks that it took. A
+        // plain-HTTP VOD whose server ignores Range requests, or an MKV
+        // without a cue index, can't be seeked: the element clamps the seek
+        // to its seekable range and silently starts at 0:00 while the
+        // sender believes the TV is at the resume point — and then saves
+        // the restarted position over the user's real progress.
+        //
+        // With resumeV2 the guard re-checks after metadata/canplay/playing/
+        // seeked and re-applies the target up to 3 times while the seekable
+        // range covers it. If it never can, it gives up loudly (debug panel)
+        // and the sender protects the saved progress on its side. A SEEK from
+        // the sender disarms it so a user's choice is never fought.
+        let startGuard = null;
+        let lastKnownTime = 0;
+
+        function seekableCovers(t) {
+            try {
+                const r = video.seekable;
+                for (let i = 0; i < r.length; i++) {
+                    if (t >= r.start(i) && t <= r.end(i)) return true;
+                }
+            } catch (_) {}
+            return false;
+        }
+
+        function disarmStartTimeGuard() {
+            if (!startGuard) return;
+            startGuard.handlers.forEach(([name, h]) => video.removeEventListener(name, h));
+            if (startGuard.timer) clearTimeout(startGuard.timer);
+            startGuard = null;
+        }
+
+        function armStartTimeGuard(target) {
+            disarmStartTimeGuard();
+            if (!feature('resumeV2') || !(target > 0)) return;
+            const guard = { target, attempts: 0, done: false, handlers: [], timer: null };
+            const finish = (msg, level) => {
+                guard.done = true;
+                dbg('resume', msg, level);
+                disarmStartTimeGuard();
+            };
+            const check = (ev) => {
+                if (guard.done) return;
+                const cur = video.currentTime || 0;
+                if (cur >= target - 2) {
+                    finish(`start at ${cur.toFixed(1)}s ok (${ev})`, 'ok');
+                    return;
+                }
+                if (guard.attempts >= 3) {
+                    finish(`gave up at ${cur.toFixed(1)}s, wanted ${target}s`, 'err');
+                    return;
+                }
+                if (!seekableCovers(target)) {
+                    dbg('resume', `${ev}: seekable range doesn't cover ${target}s yet`, 'warn');
+                    return;
+                }
+                guard.attempts += 1;
+                dbg('resume', `${ev}: at ${cur.toFixed(1)}s → re-seek to ${target}s (#${guard.attempts})`, 'warn');
+                try {
+                    video.currentTime = target;
+                } catch (e) {
+                    dbg('resume', `seek threw: ${e.message || e}`, 'err');
+                }
+            };
+            ['loadedmetadata', 'canplay', 'playing', 'seeked'].forEach((name) => {
+                const h = () => check(name);
+                guard.handlers.push([name, h]);
+                video.addEventListener(name, h);
+            });
+            // Hard stop: never keep interfering past this point.
+            guard.timer = setTimeout(() => {
+                if (!guard.done) dbg('resume', 'guard timed out', 'warn');
+                disarmStartTimeGuard();
+            }, 30000);
+            startGuard = guard;
+            dbg('resume', `guard armed for ${target}s`);
+        }
+
+        // Real playback position, so a Retry can pick up where the stream
+        // broke rather than at the original LOAD start time.
+        video.addEventListener('timeupdate', () => {
+            if (video.currentTime > 0) lastKnownTime = video.currentTime;
+        });
+
         function hideReady() {
             readyEl.classList.add('hidden');
         }
@@ -436,6 +524,8 @@
                 const sum = urlSummary(url);
                 dbg('LOAD', `${sum.host} ${sum.ext} ct=${contentType || '-'} t=${startTime}s`);
                 readSenderHandshake(request);
+                lastKnownTime = 0;
+                armStartTimeGuard(startTime);
 
                 lastLoad = { url, startTime, contentType };
 
@@ -557,14 +647,18 @@
             let failed = false;
             const recovered = { media: false, network: false };
 
-            hls = new Hls({
+            const hlsConfig = {
                 debug: false, enableWorker: true,
                 lowLatencyMode: false, backBufferLength: 30,
                 maxBufferLength: 30, maxMaxBufferLength: 60,
                 startLevel: -1, fragLoadingMaxRetry: 5,
                 manifestLoadingMaxRetry: 3, levelLoadingMaxRetry: 3,
                 fragLoadingRetryDelay: 1000, manifestLoadingTimeOut: 10000,
-            });
+            };
+            // resumeV2: let hls.js begin loading AT the resume point instead
+            // of loading from 0 and seeking once the manifest is parsed.
+            if (feature('resumeV2') && startTime > 0) hlsConfig.startPosition = startTime;
+            hls = new Hls(hlsConfig);
 
             hls.on(Hls.Events.MANIFEST_PARSED, (e, data) => {
                 const levels = (data && data.levels) || [];
@@ -576,7 +670,9 @@
                 }).slice(0, 4).join(' ');
                 dbg('manifest', `${levels.length} level(s): ${summary || '(none)'}`, 'ok');
                 showLoading(t('buffering'));
-                if (startTime > 0) video.currentTime = startTime;
+                // Legacy path only — under resumeV2 hls.js starts at
+                // `startPosition` and the guard verifies it.
+                if (startTime > 0 && !feature('resumeV2')) video.currentTime = startTime;
                 video.play().catch((e) => dbg('hls', `play() rejected: ${e.message || e}`, 'warn'));
             });
 
@@ -677,6 +773,9 @@
             cast.framework.messages.MessageType.SEEK,
             (message) => {
                 dbg('cmd', `SEEK → ${(message.currentTime || 0).toFixed(1)}s`);
+                // The user (or the sender's corrective seek) chose a
+                // position — stop re-applying the LOAD start time.
+                disarmStartTimeGuard();
                 // This is the only path that should label the overlay as
                 // "Seeking…". Anything else (initial startTime, glitch
                 // re-seeks) keeps the generic "Buffering…" copy.
@@ -782,7 +881,14 @@
             hideError();
             cleanup();
             showLoading(t('retrying'));
-            const { url, startTime, contentType } = lastLoad;
+            const { url, contentType } = lastLoad;
+            // resumeV2: pick up where playback actually broke, not at the
+            // original LOAD start time.
+            const startTime = (feature('resumeV2') && lastKnownTime > lastLoad.startTime)
+                ? Math.floor(lastKnownTime)
+                : lastLoad.startTime;
+            if (startTime !== lastLoad.startTime) dbg('retry', `resuming at ${startTime}s`);
+            armStartTimeGuard(startTime);
             const isHls = url.includes('.m3u8') || (contentType || '').includes('mpegurl');
             if (isHls && Hls.isSupported()) {
                 tryHlsJs(url, startTime, (codeLine, kind) => {
