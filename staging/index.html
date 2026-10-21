@@ -246,6 +246,8 @@
                 playerLoadTitle: "Couldn't start the player",
                 playerLoadSubtitle: "The TV couldn't load the video player. Check its internet connection and try again.",
                 audioOnly: "Playing sound only: this device can't read this channel's video (in IPTV usually MPEG-2 or HEVC), or the channel has no picture.",
+                undecodableTitle: "This device can't play this channel",
+                undecodableSubtitle: "Its video arrives in a form this device's player can't use — common with TV channels broadcast as interlaced 1080i. Watch it on your phone or try another channel.",
                 retry: 'Retry',
             },
             es: {
@@ -281,6 +283,8 @@
                 playerLoadTitle: 'No se pudo iniciar el reproductor',
                 playerLoadSubtitle: 'La tele no ha podido cargar el reproductor de vídeo. Comprueba su conexión a internet y vuelve a intentarlo.',
                 audioOnly: 'Solo se reproduce el sonido: este dispositivo no puede leer el vídeo de este canal (en IPTV suele ser MPEG-2 o HEVC), o el canal no tiene imagen.',
+                undecodableTitle: 'Este dispositivo no puede reproducir este canal',
+                undecodableSubtitle: 'Su vídeo llega de una forma que el reproductor de este dispositivo no puede usar; pasa a menudo con canales de televisión emitidos en 1080i entrelazado. Míralo en el móvil o prueba otro canal.',
                 retry: 'Reintentar',
             },
         };
@@ -488,9 +492,10 @@
         //   'tsOnly'      → live channel only offered as MPEG-TS
         //   'serverError' → HTTP 5xx
         //   'playerLoad'  → hls.js itself couldn't be loaded
+        //   'undecodable' → fragments arrive but nothing playable is buffered
         const ERROR_KINDS = [
             'codec', 'connLimit', 'rateLimit', 'auth', 'notFound',
-            'tsOnly', 'serverError', 'playerLoad',
+            'tsOnly', 'serverError', 'playerLoad', 'undecodable',
         ];
 
         function showError({ codeLine, kind, detail, status }) {
@@ -647,6 +652,7 @@
                 codecMime: null,       // what a SourceBuffer refused
                 hasPlayed: false,      // this session ever showed a picture
                 attemptPlayed: false,  // the current hls.js attempt did
+                emptyFrags: 0,         // fragments buffered with nothing playable
                 failed: false,
                 userPaused: false,
                 lastProgressAt: Date.now(),
@@ -926,6 +932,7 @@
             if (hls) { hls.destroy(); hls = null; }
             s.attemptStartedAt = Date.now();
             s.attemptPlayed = false;
+            s.emptyFrags = 0;
             s.lastProgressAt = Date.now();
             const url = s.hlsUrl || s.url;
             // Live: hls.js starts at the live edge. VOD rebuilt after it
@@ -991,6 +998,30 @@
                 if (!hasVideo && tracks && tracks.audio) {
                     dbg('codec', 'no video track this device can read — sound only', 'warn');
                     showNotice(t('audioOnly'));
+                }
+            });
+
+            // Fragments arrive and hls.js reports them buffered, yet nothing
+            // playable is in the media buffer: hls.js dropped every frame.
+            // Seen with field-coded interlaced H.264 (1080i broadcast relays):
+            // each field becomes its own sample and no sample is a keyframe.
+            // Rebuilding can't help; say so after two fragments instead of
+            // "Buffering..." until the watchdog gives up minutes later.
+            h.on(Hls.Events.FRAG_BUFFERED, (e, data) => {
+                if (session !== s || hls !== h || s.attemptPlayed) return;
+                if (!data || !data.frag || data.frag.type !== 'main') return;
+                // The video SourceBuffer itself when there is one: the
+                // element's ranges are the intersection with audio, which can
+                // lag behind on streams with a separate audio playlist.
+                const sbs = (h.bufferController && h.bufferController.sourceBuffer) || {};
+                const vsb = sbs.video || sbs.audiovideo;
+                let ranges = video.buffered;
+                try { if (vsb) ranges = vsb.buffered; } catch (_) { /* removed */ }
+                if (ranges.length > 0) { s.emptyFrags = 0; return; }
+                s.emptyFrags += 1;
+                dbg('hls', `fragment ${data.frag.sn} buffered, media buffer still empty (${s.emptyFrags})`, 'warn');
+                if (s.emptyFrags >= 2) {
+                    failSession(s, { kind: 'undecodable', codeLine: `NOTHING DECODABLE · ${s.emptyFrags} FRAGMENTS` });
                 }
             });
 
