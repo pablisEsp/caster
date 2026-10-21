@@ -36,6 +36,31 @@
             font-size: 16px; margin-top: 20px;
             letter-spacing: 1px;
         }
+        /* A wait with a reason (e.g. the provider holding the connection):
+           the line becomes a title and the reason goes underneath. */
+        #loading-text.title {
+            color: #fff; font-size: 26px; font-weight: 600;
+            letter-spacing: 0; text-align: center;
+            max-width: 720px; padding: 0 32px; margin-top: 28px;
+        }
+        #loading-detail {
+            color: rgba(255,255,255,0.6); font-size: 16px;
+            line-height: 1.5; text-align: center;
+            max-width: 640px; padding: 0 32px; margin-top: 12px;
+        }
+        #loading-detail.hidden { display: none; }
+
+        /* ━━━━━━ Notice (non-blocking, over the picture) ━━━━━━ */
+        #notice {
+            position: absolute; left: 50%; bottom: 48px;
+            transform: translateX(-50%);
+            max-width: 900px; padding: 14px 24px;
+            background: rgba(0, 0, 0, 0.75); color: rgba(255,255,255,0.9);
+            border: 1px solid rgba(255,255,255,0.15); border-radius: 12px;
+            font-size: 18px; line-height: 1.45; text-align: center;
+            z-index: 150; transition: opacity 0.4s ease; pointer-events: none;
+        }
+        #notice.hidden { opacity: 0; }
 
         /* ━━━━━━ Ready (idle, connected, no media yet) overlay ━━━━━━ */
         #ready-icon {
@@ -156,6 +181,7 @@
     <div id="loading" class="overlay hidden">
         <div class="spinner"></div>
         <div id="loading-text">Loading...</div>
+        <div id="loading-detail" class="hidden"></div>
     </div>
     <div id="error" class="overlay hidden">
         <div id="error-icon">
@@ -166,6 +192,7 @@
         <button id="error-retry">Retry</button>
         <div id="error-code"></div>
     </div>
+    <div id="notice" class="hidden"></div>
     <div id="staging-badge" class="hidden">STAGING</div>
     <div id="debug" class="hidden">
         <div id="debug-head">debug</div>
@@ -173,34 +200,95 @@
     </div>
     <video id="media" autoplay></video>
 
-    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
+    <!-- hls.js is served from this repo (vendor/, byte-identical to the npm
+         package's dist/hls.min.js) so the TV doesn't depend on a third-party
+         CDN being reachable; jsDelivr only as a fallback. Absolute path so
+         the production and staging pages share the same copy. -->
+    <script src="/caster/vendor/hls-1.5.7.min.js"></script>
+    <script>window.Hls || document.write('<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"><\/script>');</script>
     <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
     <script>
         'use strict';
 
-        // Single-language for now; structure left in place for future translations.
-        const LANG = 'en';
+        // English and Spanish. The language follows the sender's locale when
+        // it sends one (`customData.locale`) and the device's otherwise.
         const STRINGS = {
             en: {
                 loading: 'Loading...',
                 buffering: 'Buffering...',
                 retrying: 'Retrying...',
+                reconnecting: 'Reconnecting...',
                 seeking: 'Seeking…',
                 seekingSlow: 'Seeking — this may take a moment',
                 seekingStuck: 'Seek is taking too long — the server may not support this position. Try a different moment or stop casting.',
                 readyTitle: 'Ready to cast',
                 readySubtitle: 'Pick a channel or video on your phone to start streaming.',
+                waitingProviderTitle: 'Waiting for your IPTV provider…',
+                waitingProviderDetail: "The provider is refusing a second connection right now — usually because your plan allows one device at a time and the phone you cast from is still using it. It frees up within a minute or two, and this will start on its own.",
                 errorTitle: 'Stream unavailable',
                 errorSubtitle: "The provider's server isn't responding. This isn't an app issue — try another channel or check back later.",
-                codecTitle: "This Chromecast can't play that codec",
-                codecSubtitle: "Your Chromecast doesn't support the video / audio codec inside this file (often HEVC, AV1 or EAC3). Try a different release or use a newer Chromecast model.",
+                codecTitle: "This device can't play this channel",
+                codecSubtitle: "It doesn't support the channel's video format. Newer Chromecasts and TVs with Google Cast built in usually can.",
+                codecDetail: 'The channel is in {format}.',
+                formatAvcHighLevel: '1080p at 50/60 fps (H.264 level {level})',
+                connLimitTitle: 'Your IPTV plan allows one device at a time',
+                connLimitSubtitle: 'The provider kept refusing the TV because another device is still using your connection. Stop playback on your other devices and press Retry.',
                 rateLimitTitle: 'Provider is rate-limiting',
                 rateLimitSubtitle: "Your IPTV provider blocked too many requests at once. Wait a few minutes and try again, or use a different channel.",
+                authTitle: 'The provider refused this stream',
+                authSubtitle: "Your IPTV provider rejected the request (HTTP {status}). Your subscription may have expired, or the provider may block TV devices. This isn't an app issue.",
+                notFoundTitle: 'Channel not available',
+                notFoundSubtitle: "Your IPTV provider says this channel doesn't exist right now (HTTP {status}). Try another channel or check back later.",
+                tsOnlyTitle: "This channel can't be cast",
+                tsOnlySubtitle: "Your provider only offers this channel in MPEG-TS, a format this device can't play. Watch it on your phone or try another channel.",
                 serverErrorTitle: "The provider's server is having issues",
                 serverErrorSubtitle: "The IPTV server returned a 5xx error. It's likely overloaded or down. Not an app issue — try again in a moment.",
+                playerLoadTitle: "Couldn't start the player",
+                playerLoadSubtitle: "The TV couldn't load the video player. Check its internet connection and try again.",
+                audioOnly: "Playing sound only: this device can't read this channel's video (in IPTV usually MPEG-2 or HEVC), or the channel has no picture.",
                 retry: 'Retry',
             },
+            es: {
+                loading: 'Cargando...',
+                buffering: 'Cargando...',
+                retrying: 'Reintentando...',
+                reconnecting: 'Reconectando...',
+                seeking: 'Saltando…',
+                seekingSlow: 'Saltando — puede tardar un momento',
+                seekingStuck: 'El salto está tardando demasiado: puede que el servidor no admita esta posición. Prueba otro momento o deja de enviar.',
+                readyTitle: 'Listo para enviar',
+                readySubtitle: 'Elige un canal o un vídeo en el móvil para empezar.',
+                waitingProviderTitle: 'Esperando a tu proveedor IPTV…',
+                waitingProviderDetail: 'El proveedor está rechazando una segunda conexión: normalmente tu plan solo permite un dispositivo a la vez y el móvil desde el que envías aún la está usando. Se libera en un minuto o dos y esto empezará solo.',
+                errorTitle: 'Emisión no disponible',
+                errorSubtitle: 'El servidor del proveedor no responde. No es un problema de la app: prueba otro canal o vuelve a intentarlo más tarde.',
+                codecTitle: 'Este dispositivo no puede reproducir este canal',
+                codecSubtitle: 'No admite el formato de vídeo del canal. Los Chromecast más nuevos y los televisores con Google Cast integrado suelen poder.',
+                codecDetail: 'El canal está en {format}.',
+                formatAvcHighLevel: '1080p a 50/60 fps (H.264 nivel {level})',
+                connLimitTitle: 'Tu plan IPTV solo permite un dispositivo a la vez',
+                connLimitSubtitle: 'El proveedor ha seguido rechazando la tele porque otro dispositivo usa tu conexión. Deja de reproducir en los demás dispositivos y pulsa Reintentar.',
+                rateLimitTitle: 'El proveedor está limitando las peticiones',
+                rateLimitSubtitle: 'Tu proveedor IPTV ha bloqueado demasiadas peticiones a la vez. Espera unos minutos y vuelve a intentarlo, o prueba otro canal.',
+                authTitle: 'El proveedor ha rechazado esta emisión',
+                authSubtitle: 'Tu proveedor IPTV ha rechazado la petición (HTTP {status}). Puede que tu suscripción haya caducado o que el proveedor bloquee los televisores. No es un problema de la app.',
+                notFoundTitle: 'Canal no disponible',
+                notFoundSubtitle: 'Tu proveedor IPTV dice que este canal no existe ahora mismo (HTTP {status}). Prueba otro canal o vuelve más tarde.',
+                tsOnlyTitle: 'Este canal no se puede enviar',
+                tsOnlySubtitle: 'Tu proveedor solo ofrece este canal en MPEG-TS, un formato que este dispositivo no puede reproducir. Míralo en el móvil o prueba otro canal.',
+                serverErrorTitle: 'El servidor del proveedor tiene problemas',
+                serverErrorSubtitle: 'El servidor IPTV ha devuelto un error 5xx. Seguramente está saturado o caído. No es un problema de la app: vuelve a intentarlo en un momento.',
+                playerLoadTitle: 'No se pudo iniciar el reproductor',
+                playerLoadSubtitle: 'La tele no ha podido cargar el reproductor de vídeo. Comprueba su conexión a internet y vuelve a intentarlo.',
+                audioOnly: 'Solo se reproduce el sonido: este dispositivo no puede leer el vídeo de este canal (en IPTV suele ser MPEG-2 o HEVC), o el canal no tiene imagen.',
+                retry: 'Reintentar',
+            },
         };
+        const pickLang = (locale) => {
+            const code = String(locale || '').slice(0, 2).toLowerCase();
+            return STRINGS[code] ? code : 'en';
+        };
+        let LANG = pickLang(navigator.language);
         const t = (key) => (STRINGS[LANG] && STRINGS[LANG][key]) || STRINGS.en[key];
 
         const video = document.getElementById('media');
@@ -263,6 +351,10 @@
             } : null;
             activeFeatures = (custom.features && typeof custom.features === 'object')
                 ? custom.features : {};
+            // Senders from 1.5.1 send their UI locale; for older ones it's the
+            // device's language (per LOAD, so it never sticks from a
+            // previous sender).
+            LANG = pickLang(custom.locale || navigator.language);
             const on = Object.keys(activeFeatures).filter(feature).join(',') || '-';
             dbg('sender', senderInfo
                 ? `${senderInfo.app} ${senderInfo.version} (${senderInfo.platform}) features=${on}`
@@ -360,8 +452,13 @@
         function hideReady() {
             readyEl.classList.add('hidden');
         }
-        function showLoading(text) {
+        const loadingDetail = document.getElementById('loading-detail');
+        function showLoading(text, detail) {
             loadingText.textContent = text || t('loading');
+            // With a reason underneath, the line reads as a title.
+            loadingText.classList.toggle('title', !!detail);
+            loadingDetail.textContent = detail || '';
+            loadingDetail.classList.toggle('hidden', !detail);
             // Any time we show a loading state, the idle/ready overlay
             // is no longer relevant — hide it so we don't stack overlays.
             hideReady();
@@ -371,27 +468,36 @@
             loadingEl.classList.add('hidden');
         }
 
-        function showError({ codeLine, kind }) {
-            // `kind` lets callers pick a more specific copy. Falls back
-            // to the generic "Stream unavailable" message.
-            //   'codec'       → unsupported codec inside the container
-            //   'rateLimit'   → HTTP 429 / 509 from the provider
-            //   'serverError' → other HTTP 5xx from the provider
-            //   default       → generic network failure
-            const titleKey = (
-                kind === 'codec' ? 'codecTitle' :
-                kind === 'rateLimit' ? 'rateLimitTitle' :
-                kind === 'serverError' ? 'serverErrorTitle' :
-                'errorTitle'
-            );
-            const subtitleKey = (
-                kind === 'codec' ? 'codecSubtitle' :
-                kind === 'rateLimit' ? 'rateLimitSubtitle' :
-                kind === 'serverError' ? 'serverErrorSubtitle' :
-                'errorSubtitle'
-            );
-            errorTitle.textContent = t(titleKey);
-            errorSubtitle.textContent = t(subtitleKey);
+        // A message over the picture that doesn't stop playback.
+        const noticeEl = document.getElementById('notice');
+        function showNotice(text) {
+            noticeEl.textContent = text;
+            noticeEl.classList.remove('hidden');
+        }
+        function hideNotice() {
+            noticeEl.classList.add('hidden');
+        }
+
+        // Error copy by `kind`; anything else gets the generic "Stream
+        // unavailable" message.
+        //   'codec'       → this device can't decode the channel's format
+        //   'connLimit'   → provider kept refusing a second connection
+        //   'rateLimit'   → provider kept answering HTTP 429
+        //   'auth'        → HTTP 401 / 403 / 407
+        //   'notFound'    → HTTP 404 / 410
+        //   'tsOnly'      → live channel only offered as MPEG-TS
+        //   'serverError' → HTTP 5xx
+        //   'playerLoad'  → hls.js itself couldn't be loaded
+        const ERROR_KINDS = [
+            'codec', 'connLimit', 'rateLimit', 'auth', 'notFound',
+            'tsOnly', 'serverError', 'playerLoad',
+        ];
+
+        function showError({ codeLine, kind, detail, status }) {
+            const key = ERROR_KINDS.includes(kind) ? kind : 'error';
+            const fill = (s) => s.replace('{status}', status || '?');
+            errorTitle.textContent = t(`${key}Title`);
+            errorSubtitle.textContent = fill(t(`${key}Subtitle`)) + (detail ? ` ${detail}` : '');
             errorRetry.textContent = t('retry');
             errorCode.textContent = codeLine || '';
             hideLoading();
@@ -468,6 +574,8 @@
         const playerManager = context.getPlayerManager();
 
         function cleanup() {
+            endSession();
+            hideNotice();
             if (hls) { hls.destroy(); hls = null; }
             video.removeAttribute('src');
             video.load();
@@ -485,19 +593,182 @@
             }
         }
 
+        // ━━━━━━ Playback sessions ━━━━━━
+        //
+        // Each LOAD (or the on-TV Retry) starts a playback session. Its
+        // timers and callbacks check `session === s` and bail once a newer
+        // one replaced it, so a late retry for the previous channel never
+        // touches the current one.
+        //
+        // On top of hls.js's own recovery, a session:
+        //   * Waits out a provider that refuses the TV a connection (HTTP
+        //     458 / 509 / 429). With one-connection IPTV plans the phone
+        //     that just started casting still holds the slot for a minute
+        //     or two after it stops. hls.js never retries a 4xx, and
+        //     `startLoad()` can't reload a manifest that never loaded, so the
+        //     TV used to sit on "Loading..." forever. Now the stream is
+        //     rebuilt every few seconds for up to SLOT_WAIT_MS, with the
+        //     reason on screen.
+        //   * Ends every other playlist failure on a specific error screen
+        //     (and LOAD_FAILED while CAF still waits) instead of "Loading...".
+        //   * Fails at once, naming the format, when this device can't decode
+        //     the channel (e.g. 1080p50 = H.264 level 4.2 on a 2nd-gen
+        //     Chromecast).
+        //   * Rebuilds the stream (live: at the live edge) after media errors
+        //     and frozen playback, a few times before giving up.
+        //   * Plays a live `.ts` LOAD through its `.m3u8` sibling, as raw
+        //     MPEG-TS doesn't play here; the `.ts` itself is only the
+        //     fallback when the provider has no HLS for the channel.
+        const SLOT_WAIT_MS = 180000;
+        const SLOT_RETRY_DELAYS_MS = [4000, 6000, 8000, 10000, 15000];
+        const CONN_REFUSED_STATUSES = [458, 509, 429];
+        const MAX_REBUILDS = 3;            // within REBUILD_WINDOW_MS
+        const REBUILD_WINDOW_MS = 120000;
+        const FROZEN_AFTER_MS = 25000;     // no progress while meant to play
+        const NO_START_AFTER_MS = 45000;   // an attempt that never started
+
+        let session = null;
+
+        function newSession({ url, contentType, startTime, isLive }) {
+            endSession();
+            const s = {
+                url, contentType, startTime, isLive,
+                engine: null,          // 'hls' | 'native'
+                hlsUrl: null,          // .m3u8 sibling of a live .ts LOAD
+                request: null,         // CAF's LOAD request (hls engine)
+                tsMedia: null,         // its original media fields, if rewritten
+                settle: null,          // resolves CAF's pending LOAD, once
+                attemptStartedAt: Date.now(),
+                slotWaitStartedAt: 0,
+                slotRetries: 0,
+                rebuilds: [],          // timestamps, for the per-window cap
+                totalRebuilds: 0,
+                networkRecovered: false,
+                codecMime: null,       // what a SourceBuffer refused
+                hasPlayed: false,      // this session ever showed a picture
+                attemptPlayed: false,  // the current hls.js attempt did
+                failed: false,
+                userPaused: false,
+                lastProgressAt: Date.now(),
+                lastProgressPos: 0,
+                timers: new Set(),
+            };
+            session = s;
+            return s;
+        }
+
+        function endSession() {
+            const s = session;
+            if (!s) return;
+            session = null;
+            s.timers.forEach(clearTimeout);
+            s.timers.clear();
+            // Never leave CAF waiting on a LOAD nobody will settle.
+            settleOk(s);
+        }
+
+        function later(s, ms, fn) {
+            const id = setTimeout(() => {
+                s.timers.delete(id);
+                if (session === s) fn();
+            }, ms);
+            s.timers.add(id);
+        }
+
+        function loadFailedError() {
+            const err = new cast.framework.messages.ErrorData(
+                cast.framework.messages.ErrorType.LOAD_FAILED
+            );
+            err.reason = cast.framework.messages.ErrorReason.GENERIC_LOAD_ERROR;
+            return err;
+        }
+
+        // Settle CAF's pending LOAD (if any) exactly once.
+        function settleOk(s, request) {
+            if (!s.settle) return;
+            const resolve = s.settle;
+            s.settle = null;
+            resolve(request || s.request);
+        }
+        function settleFail(s) {
+            if (!s.settle) return;
+            const resolve = s.settle;
+            s.settle = null;
+            resolve(loadFailedError());
+        }
+
+        // Terminal: error screen, and LOAD_FAILED if CAF still waits (the
+        // sender then reports the failure instead of "casting").
+        function failSession(s, { kind, codeLine, detail, status } = {}) {
+            if (session !== s || s.failed) return;
+            s.failed = true;
+            s.timers.forEach(clearTimeout);
+            s.timers.clear();
+            if (hls) { hls.destroy(); hls = null; }
+            dbg('fail', `${kind || 'generic'} · ${codeLine || '-'}`, 'err');
+            showError({ kind, codeLine, detail, status });
+            settleFail(s);
+        }
+
+        const isTsUrl = (u) => /\.ts(?=$|[?#])/i.test(u);
+        const tsToM3u8 = (u) => u.replace(/\.ts(?=$|[?#])/i, '.m3u8');
+        // Catch-up/timeshift is `.ts` only (no HLS sibling); senders never
+        // cast it, but don't rewrite it if one ever does.
+        const isLiveTs = (url, isLive) => isLive && isTsUrl(url) && !/timeshift/i.test(url);
+
+        function httpKind(status) {
+            if (status === 401 || status === 403 || status === 407) return 'auth';
+            if (status === 404 || status === 410) return 'notFound';
+            if (status >= 500 && status < 600) return 'serverError';
+            return undefined;
+        }
+
+        function errorLine(data, status) {
+            return [
+                (data.type || 'ERROR').replace('Error', '').toUpperCase(),
+                data.details || 'unknown',
+                status ? `HTTP ${status}` : null,
+            ].filter(Boolean).join(' · ');
+        }
+
+        // "video/mp4;codecs=avc1.4d402a" → human wording for the error screen.
+        function describeFormat(mime) {
+            const m = /codecs="?([^",;]+)/i.exec(mime || '');
+            const codec = m ? m[1] : '';
+            const avc = /^avc[13]\.[0-9a-f]{4}([0-9a-f]{2})$/i.exec(codec);
+            if (avc) {
+                const level = parseInt(avc[1], 16) / 10;
+                return level >= 4.2
+                    ? t('formatAvcHighLevel').replace('{level}', level.toFixed(1))
+                    : `H.264 (${codec})`;
+            }
+            if (/^(hvc1|hev1)/i.test(codec)) return 'HEVC (H.265)';
+            if (/^av01/i.test(codec)) return 'AV1';
+            return codec;
+        }
+        function codecFailure(s) {
+            const format = describeFormat(s.codecMime);
+            return {
+                kind: 'codec',
+                codeLine: `INCOMPATIBLE CODEC · ${s.codecMime || '?'}`,
+                detail: format ? t('codecDetail').replace('{format}', format) : '',
+            };
+        }
+
         // ━━━━━━ LOAD interceptor (IPTV-first router) ━━━━━━
         //
         // Engine routing:
-        //   * .m3u8 / mpegurl → hls.js (takes control of <video> via MSE)
-        //   * everything else (.mp4, .mkv, .mov, .ts catch-up…) → let CAF
-        //     assign video.src itself. We don't touch the element, just
-        //     attach listeners. This avoids the duplicate load that
-        //     happened when both we *and* CAF were setting video.src.
+        //   * .m3u8 / mpegurl, and live .ts (via its .m3u8) → hls.js (takes
+        //     control of <video> via MSE)
+        //   * everything else (.mp4, .mkv, .mov…) → let CAF assign video.src
+        //     itself. We don't touch the element, just attach listeners. This
+        //     avoids the duplicate load that happened when both we *and* CAF
+        //     were setting video.src.
         //
         // LOAD promise resolution:
-        //   * HLS: resolved on the video element's first `playing` event.
-        //     hls.js drives playback via MSE; CAF doesn't re-load on top
-        //     of us so the "wait until real picture" UX is preserved.
+        //   * HLS: resolved on the video element's first `playing` event, or
+        //     with LOAD_FAILED on a terminal failure, or optimistically after
+        //     20 s (a provider wait keeps going after that).
         //   * Native: resolved immediately with `request`. CAF then loads
         //     the src itself, single-pass. The sender shows "casting" a
         //     couple of seconds before the picture appears — the
@@ -508,6 +779,7 @@
                 const url = request.media.contentUrl || request.media.contentId;
                 const contentType = (request.media.contentType || '').toLowerCase();
                 const startTime = request.currentTime || 0;
+                const isLive = request.media.streamType === cast.framework.messages.StreamType.LIVE;
 
                 cleanup();
                 hideError();
@@ -522,24 +794,33 @@
                 }
 
                 const sum = urlSummary(url);
-                dbg('LOAD', `${sum.host} ${sum.ext} ct=${contentType || '-'} t=${startTime}s`);
+                dbg('LOAD', `${sum.host} ${sum.ext} ct=${contentType || '-'} t=${startTime}s${isLive ? ' live' : ''}`);
                 readSenderHandshake(request);
                 lastKnownTime = 0;
                 armStartTimeGuard(startTime);
 
-                lastLoad = { url, startTime, contentType };
+                lastLoad = { url, startTime, contentType, isLive };
 
                 const isHls = url.includes('.m3u8') || contentType.includes('mpegurl');
+                const liveTs = !isHls && isLiveTs(url, isLive);
 
-                if (isHls && Hls.isSupported()) {
-                    dbg('engine', 'hls.js', 'ok');
-                    return loadWithHlsJs(request, url, startTime);
+                if (isHls || liveTs) {
+                    if (!window.Hls) {
+                        // Neither the vendored copy nor the CDN fallback loaded.
+                        const s = newSession({ url, contentType, startTime, isLive });
+                        failSession(s, { kind: 'playerLoad', codeLine: 'HLS.JS NOT LOADED' });
+                        return loadFailedError();
+                    }
+                    if (Hls.isSupported()) {
+                        return loadWithHlsJs(request, { url, contentType, startTime, isLive, liveTs });
+                    }
                 }
-                if (isHls && !Hls.isSupported() && video.canPlayType('application/vnd.apple.mpegurl')) {
+                if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
                     dbg('engine', 'native HLS', 'ok');
-                    return loadWithCafNative(request);
+                } else {
+                    dbg('engine', `native (${sum.ext})`, 'ok');
                 }
-                dbg('engine', `native (${sum.ext})`, 'ok');
+                newSession({ url, contentType, startTime, isLive }).engine = 'native';
                 return loadWithCafNative(request);
             }
         );
@@ -589,68 +870,66 @@
         // re-assign video.src on top of us, so we can safely wait for
         // the first `playing` event before resolving — the sender then
         // shows "casting" only when there's a real frame on screen.
-        function loadWithHlsJs(request, url, startTime) {
+        function loadWithHlsJs(request, opts) {
             return new Promise((resolve) => {
-                let settled = false;
-                const onFirstPlaying = () => {
-                    if (settled) return;
-                    settled = true;
-                    video.removeEventListener('playing', onFirstPlaying);
-                    dbg('LOAD', 'video PLAYING → resolving CAF', 'ok');
-                    resolve(request);
-                };
-                video.addEventListener('playing', onFirstPlaying);
-
-                const onFatal = (codeLine, kind) => {
-                    // Show the on-TV error overlay in BOTH cases:
-                    //   * Pre-settled (load never succeeded): also bubble
-                    //     a LOAD_FAILED back to CAF so the sender clears
-                    //     its "casting" state.
-                    //   * Post-settled (in-session failure, e.g. provider
-                    //     returns HTTP 509 mid-playback and hls.js gives
-                    //     up): the cast session is still open, but the
-                    //     stream is dead. The sender doesn't have a clean
-                    //     signal for this — but the user at least sees
-                    //     what went wrong on the TV.
-                    dbg(
-                        settled ? 'in-session' : 'LOAD',
-                        `fatal → ${codeLine}`,
-                        'err',
-                    );
-                    showError({ codeLine, kind });
-                    if (settled) return;
-                    settled = true;
-                    video.removeEventListener('playing', onFirstPlaying);
-                    const err = new cast.framework.messages.ErrorData(
-                        cast.framework.messages.ErrorType.LOAD_FAILED
-                    );
-                    err.reason = cast.framework.messages.ErrorReason.GENERIC_LOAD_ERROR;
-                    resolve(err);
-                };
-
-                // Safety net: if hls.js never fires MANIFEST_PARSED or the
-                // video never reaches `playing`, resolve optimistically so
-                // CAF doesn't hang forever.
-                setTimeout(() => {
-                    if (settled) return;
-                    settled = true;
-                    video.removeEventListener('playing', onFirstPlaying);
+                const s = newSession(opts);
+                s.engine = 'hls';
+                s.request = request;
+                s.settle = resolve;
+                if (opts.liveTs) {
+                    s.hlsUrl = tsToM3u8(opts.url);
+                    // CAF loads a non-HLS request into the <video> itself and
+                    // would fight hls.js for it; present the request as the
+                    // HLS one actually playing. fallBackToTs() restores it.
+                    const media = request.media;
+                    s.tsMedia = {
+                        contentUrl: media.contentUrl,
+                        contentId: media.contentId,
+                        contentType: media.contentType,
+                    };
+                    if (media.contentUrl) media.contentUrl = s.hlsUrl;
+                    if (media.contentId) media.contentId = s.hlsUrl;
+                    media.contentType = 'application/x-mpegurl';
+                    dbg('engine', 'live .ts → hls.js with its .m3u8', 'ok');
+                } else {
+                    dbg('engine', 'hls.js', 'ok');
+                }
+                // Safety net: CAF must not wait forever for the first frame.
+                // Resolving keeps the session — and a provider wait — going;
+                // the screen says what is happening.
+                later(s, 20000, () => {
+                    if (!s.settle) return;
                     dbg('LOAD', 'no PLAYING in 20s — resolving optimistically', 'warn');
-                    resolve(request);
-                }, 20000);
-
-                tryHlsJs(url, startTime, onFatal);
+                    settleOk(s);
+                });
+                startHls(s);
             });
         }
 
-        function tryHlsJs(url, startTime, onFatal) {
-            let failed = false;
-            const recovered = { media: false, network: false };
+        function startHls(s) {
+            if (session !== s) return;
+            if (hls) { hls.destroy(); hls = null; }
+            s.attemptStartedAt = Date.now();
+            s.attemptPlayed = false;
+            s.lastProgressAt = Date.now();
+            const url = s.hlsUrl || s.url;
+            // Live: hls.js starts at the live edge. VOD rebuilt after it
+            // played: pick up where it was.
+            const startTime = s.isLive ? 0 : (s.hasPlayed ? Math.floor(lastKnownTime) : s.startTime);
 
             const hlsConfig = {
                 debug: false, enableWorker: true,
-                lowLatencyMode: false, backBufferLength: 30,
-                maxBufferLength: 30, maxMaxBufferLength: 60,
+                lowLatencyMode: false,
+                // Cast devices give MSE far less memory than desktop Chrome
+                // (~30 MB of video on a 2nd-gen Chromecast). hls.js's defaults
+                // (60 MB, unbounded back buffer) overflowed it: QuotaExceeded,
+                // buffer collapse, stalls and re-downloaded fragments.
+                backBufferLength: 10,
+                maxBufferLength: 20, maxMaxBufferLength: 30,
+                maxBufferSize: 20 * 1000 * 1000,
+                // The Cast pipeline takes longer than desktop to restart after
+                // a seek; the defaults (2 s, 3 nudges) gave up too early.
+                highBufferWatchdogPeriod: 5, nudgeMaxRetry: 6,
                 startLevel: -1, fragLoadingMaxRetry: 5,
                 manifestLoadingMaxRetry: 3, levelLoadingMaxRetry: 3,
                 fragLoadingRetryDelay: 1000, manifestLoadingTimeOut: 10000,
@@ -658,9 +937,10 @@
             // resumeV2: let hls.js begin loading AT the resume point instead
             // of loading from 0 and seeking once the manifest is parsed.
             if (feature('resumeV2') && startTime > 0) hlsConfig.startPosition = startTime;
-            hls = new Hls(hlsConfig);
+            const h = hls = new Hls(hlsConfig);
 
-            hls.on(Hls.Events.MANIFEST_PARSED, (e, data) => {
+            h.on(Hls.Events.MANIFEST_PARSED, (e, data) => {
+                if (session !== s || hls !== h) return;
                 const levels = (data && data.levels) || [];
                 const summary = levels.map((l) => {
                     const codecs = [l.videoCodec, l.audioCodec].filter(Boolean).join('+');
@@ -669,6 +949,12 @@
                     return `${res}@${br}[${codecs || '?'}]`;
                 }).slice(0, 4).join(' ');
                 dbg('manifest', `${levels.length} level(s): ${summary || '(none)'}`, 'ok');
+                if (s.slotWaitStartedAt) {
+                    const waited = Math.round((Date.now() - s.slotWaitStartedAt) / 1000);
+                    dbg('slot', `provider accepted after ${waited}s`, 'ok');
+                    s.slotWaitStartedAt = 0;
+                    s.slotRetries = 0;
+                }
                 showLoading(t('buffering'));
                 // Legacy path only — under resumeV2 hls.js starts at
                 // `startPosition` and the guard verifies it.
@@ -676,71 +962,239 @@
                 video.play().catch((e) => dbg('hls', `play() rejected: ${e.message || e}`, 'warn'));
             });
 
-            hls.on(Hls.Events.LEVEL_SWITCHED, (e, data) => {
+            h.on(Hls.Events.LEVEL_SWITCHED, (e, data) => {
                 dbg('hls', `level → ${data.level}`);
             });
 
-            hls.on(Hls.Events.ERROR, (e, data) => {
-                const httpStatus = data && data.response && data.response.code;
-                const summary = `${data.type || '?'} · ${data.details || '?'}` +
-                    (httpStatus ? ` · HTTP ${httpStatus}` : '') +
-                    (data.fatal ? ' · FATAL' : '');
-                if (!data.fatal) {
-                    // bufferStalledError is emitted as MEDIA_ERROR in hls.js,
-                    // not NETWORK_ERROR. Use `details` alone so we actually
-                    // trigger the startLoad() recovery.
-                    if (
-                        data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR &&
-                        !recovered.stall
-                    ) {
-                        recovered.stall = true;
-                        dbg('recover', `${summary} → startLoad()`, 'warn');
-                        hls.startLoad();
-                    } else {
-                        dbg('hls', summary, 'warn');
-                    }
-                    return;
-                }
-
-                if (data.type === Hls.ErrorTypes.MEDIA_ERROR && !recovered.media) {
-                    recovered.media = true;
-                    dbg('recover', `${summary} → recoverMediaError()`, 'warn');
-                    hls.recoverMediaError();
-                    return;
-                }
-                if (data.type === Hls.ErrorTypes.NETWORK_ERROR && !recovered.network) {
-                    recovered.network = true;
-                    dbg('recover', `${summary} → startLoad()`, 'warn');
-                    hls.startLoad();
-                    return;
-                }
-
-                if (!failed) {
-                    failed = true;
-                    dbg('hls', `giving up: ${summary}`, 'err');
-                    const detail = [
-                        (data.type || 'ERROR').replace('Error', '').toUpperCase(),
-                        data.details || 'unknown',
-                        httpStatus ? `HTTP ${httpStatus}` : null,
-                    ].filter(Boolean).join(' · ');
-                    // Map HTTP status to a more specific overlay copy.
-                    // 429 / 509 mean the provider blocked us for too
-                    // many requests; other 5xx mean their server is
-                    // returning an error itself.
-                    let kind;
-                    if (httpStatus === 429 || httpStatus === 509) {
-                        kind = 'rateLimit';
-                    } else if (httpStatus >= 500 && httpStatus < 600) {
-                        kind = 'serverError';
-                    }
-                    hls.destroy(); hls = null;
-                    if (onFatal) onFatal(detail, kind);
+            // hls.js reads only H.264 video out of MPEG-TS: an MPEG-2 or HEVC
+            // channel yields no video track, no error, and sound over black.
+            // Say so (radio channels have no video either, hence a notice and
+            // not an error).
+            h.on(Hls.Events.BUFFER_CODECS, (e, tracks) => {
+                if (session !== s || hls !== h) return;
+                const hasVideo = !!(tracks && (tracks.video || tracks.audiovideo));
+                if (!hasVideo && tracks && tracks.audio) {
+                    dbg('codec', 'no video track this device can read — sound only', 'warn');
+                    showNotice(t('audioOnly'));
                 }
             });
 
-            hls.loadSource(url);
-            hls.attachMedia(video);
+            h.on(Hls.Events.ERROR, (e, data) => onHlsError(s, h, data));
+
+            h.loadSource(url);
+            h.attachMedia(video);
         }
+
+        function onHlsError(s, h, data) {
+            if (session !== s || hls !== h || s.failed) return;
+            const D = Hls.ErrorDetails;
+            const status = data && data.response && data.response.code;
+            const summary = `${data.type || '?'} · ${data.details || '?'}` +
+                (status ? ` · HTTP ${status}` : '') +
+                (data.fatal ? ' · FATAL' : '');
+
+            // A SourceBuffer refused the codec. Not fatal to hls.js, which
+            // carries on with the tracks it could create; without video
+            // that's sound over a black screen, so fail on a video track.
+            if (data.details === D.BUFFER_ADD_CODEC_ERROR) {
+                s.codecMime = data.mimeType || s.codecMime;
+                dbg('codec', `refused ${data.mimeType || '?'}`, 'err');
+                if (/^video\//i.test(data.mimeType || '')) failSession(s, codecFailure(s));
+                return;
+            }
+            if (data.details === D.BUFFER_INCOMPATIBLE_CODECS_ERROR ||
+                data.details === D.MANIFEST_INCOMPATIBLE_CODECS_ERROR) {
+                failSession(s, codecFailure(s));
+                return;
+            }
+
+            if (!data.fatal) {
+                // hls.js handles stalls itself (nudges, gap jumps). Calling
+                // startLoad() here aborted the fragment in flight and caused
+                // re-downloads.
+                dbg('hls', summary, 'warn');
+                return;
+            }
+
+            // The provider refuses the connection: wait for it to free up.
+            if (CONN_REFUSED_STATUSES.includes(status)) {
+                waitForSlot(s, status, summary);
+                return;
+            }
+
+            const playlistDetails = [
+                D.MANIFEST_LOAD_ERROR, D.MANIFEST_LOAD_TIMEOUT, D.MANIFEST_PARSING_ERROR,
+                D.LEVEL_EMPTY_ERROR, D.LEVEL_LOAD_ERROR, D.LEVEL_LOAD_TIMEOUT,
+                D.LEVEL_PARSING_ERROR,
+            ];
+            const noLevels = !h.levels || !h.levels.length;
+
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR &&
+                (playlistDetails.includes(data.details) || noLevels)) {
+                // Live .ts LOAD whose provider has no HLS for the channel.
+                if (s.hlsUrl && !s.hasPlayed &&
+                    ([400, 403, 404, 405, 406].includes(status) ||
+                     data.details === D.MANIFEST_PARSING_ERROR)) {
+                    fallBackToTs(s, summary);
+                    return;
+                }
+                const kind = httpKind(status);
+                if (kind) {
+                    failSession(s, { kind, codeLine: errorLine(data, status), status });
+                    return;
+                }
+                // No status (network, CORS) or a timeout: often transient.
+                if (rebuild(s, summary)) return;
+                failSession(s, { codeLine: errorLine(data, status) });
+                return;
+            }
+
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                // Fragment level, playlist loaded: startLoad() resumes.
+                if (!s.networkRecovered) {
+                    s.networkRecovered = true;
+                    dbg('recover', `${summary} → startLoad()`, 'warn');
+                    h.startLoad();
+                    return;
+                }
+                if (rebuild(s, summary)) return;
+                failSession(s, { kind: httpKind(status), codeLine: errorLine(data, status), status });
+                return;
+            }
+
+            // Media errors: recoverMediaError() left the element paused with
+            // loading stopped (a silent freeze); rebuild from scratch instead.
+            if (rebuild(s, summary)) return;
+            failSession(s, { codeLine: errorLine(data, status) });
+        }
+
+        function waitForSlot(s, status, summary) {
+            const now = Date.now();
+            if (!s.slotWaitStartedAt) {
+                s.slotWaitStartedAt = now;
+                dbg('slot', `${summary} → waiting for the provider to free the connection`, 'warn');
+            }
+            if (hls) { hls.destroy(); hls = null; }
+            if (now - s.slotWaitStartedAt >= SLOT_WAIT_MS) {
+                failSession(s, {
+                    kind: status === 429 ? 'rateLimit' : 'connLimit',
+                    codeLine: `PROVIDER REFUSED · HTTP ${status}`,
+                    status,
+                });
+                return;
+            }
+            showLoading(t('waitingProviderTitle'), t('waitingProviderDetail'));
+            const delay = SLOT_RETRY_DELAYS_MS[Math.min(s.slotRetries, SLOT_RETRY_DELAYS_MS.length - 1)];
+            s.slotRetries += 1;
+            later(s, delay, () => {
+                const waited = Math.round((Date.now() - s.slotWaitStartedAt) / 1000);
+                dbg('slot', `retry #${s.slotRetries} after ${waited}s`);
+                startHls(s);
+            });
+        }
+
+        function rebuild(s, reason) {
+            const now = Date.now();
+            // Before the first picture the cap is absolute, or a stream that
+            // never starts would be rebuilt forever (another endless
+            // "Loading..."); once it has played, it's per window.
+            if (!s.hasPlayed && s.totalRebuilds >= MAX_REBUILDS) return false;
+            s.rebuilds = s.rebuilds.filter((at) => now - at < REBUILD_WINDOW_MS);
+            if (s.rebuilds.length >= MAX_REBUILDS) return false;
+            s.rebuilds.push(now);
+            s.totalRebuilds += 1;
+            dbg('recover', `${reason} → rebuilding the stream (#${s.rebuilds.length})`, 'warn');
+            if (s.hasPlayed) {
+                // Resume from where it was, not the LOAD's start time.
+                disarmStartTimeGuard();
+                showLoading(t('reconnecting'));
+            }
+            if (hls) { hls.destroy(); hls = null; }
+            s.networkRecovered = false;
+            later(s, 1000, () => startHls(s));
+            return true;
+        }
+
+        // The provider has no HLS for this live .ts: play the .ts itself, as
+        // this receiver did before trying HLS first. Chromecast can't, so
+        // that usually ends on the "only MPEG-TS" screen; devices that can
+        // (some TVs) just play it.
+        function fallBackToTs(s, summary) {
+            dbg('engine', `${summary} → no HLS, trying the .ts natively`, 'warn');
+            if (hls) { hls.destroy(); hls = null; }
+            s.hlsUrl = null;
+            s.engine = 'native';
+            const onError = () => {
+                video.removeEventListener('error', onError);
+                if (session !== s) return;
+                const code = video.error ? video.error.code : 0;
+                failSession(s, { kind: 'tsOnly', codeLine: `MEDIA_ERROR · ${code} · MPEG-TS` });
+            };
+            video.addEventListener('error', onError);
+            if (s.settle && s.tsMedia) {
+                // CAF still waits on this LOAD: hand it back the original .ts
+                // request and let CAF load it, as the native engine does.
+                Object.assign(s.request.media, s.tsMedia);
+                settleOk(s, s.request);
+            } else {
+                video.src = s.url;
+                video.load();
+                video.play().catch((e) => dbg('native', `play() rejected: ${e.message || e}`, 'warn'));
+            }
+        }
+
+        // Progress bookkeeping for the watchdog, and the LOAD's success.
+        video.addEventListener('playing', () => {
+            const s = session;
+            if (!s) return;
+            s.hasPlayed = true;
+            s.attemptPlayed = true;
+            s.lastProgressAt = Date.now();
+            settleOk(s);
+        });
+
+        // ━━━━━━ Watchdog (hls engine) ━━━━━━
+        //
+        // hls.js recovers most hiccups itself, but the receiver used to freeze
+        // silently: element paused after a media recovery, or no progress
+        // while nothing errored. Every 5 s:
+        //   * paused without the user asking → play()
+        //   * no progress for FROZEN_AFTER_MS → rebuild (then give up)
+        //   * an attempt that never started in NO_START_AFTER_MS → same
+        // A provider wait, a user pause and a user seek are left alone.
+        setInterval(() => {
+            const s = session;
+            if (!s || s.failed || s.engine !== 'hls' || s.slotWaitStartedAt || !hls) return;
+            const now = Date.now();
+            if (video.currentTime > s.lastProgressPos + 0.2 || video.currentTime < s.lastProgressPos - 1) {
+                s.lastProgressPos = video.currentTime;
+                s.lastProgressAt = now;
+                return;
+            }
+            if (s.userPaused || isSeeking) {
+                s.lastProgressAt = now;
+                return;
+            }
+            // An attempt (the first or a rebuild) gets the start-up allowance;
+            // "frozen" only applies once that attempt has shown a picture.
+            if (!s.attemptPlayed) {
+                if (now - s.attemptStartedAt > NO_START_AFTER_MS &&
+                    !rebuild(s, `no picture after ${NO_START_AFTER_MS / 1000}s`)) {
+                    failSession(s, { codeLine: 'NO PLAYBACK' });
+                }
+                return;
+            }
+            if (video.paused && video.readyState >= 3) {
+                dbg('watchdog', 'paused without the user → play()', 'warn');
+                video.play().catch(() => {});
+            }
+            if (now - s.lastProgressAt > FROZEN_AFTER_MS) {
+                s.lastProgressAt = now;
+                if (!rebuild(s, `frozen for ${FROZEN_AFTER_MS / 1000}s`)) {
+                    failSession(s, { codeLine: 'PLAYBACK FROZEN' });
+                }
+            }
+        }, 5000);
 
         // ━━━━━━ PLAY / PAUSE interceptors ━━━━━━
         //
@@ -751,6 +1205,8 @@
         // CAF maps it to videoElement.currentTime out of the box once the
         // session has transitioned out of LOADING.
         const changePlaybackStatus = (shouldPlay) => (message) => {
+            // The watchdog leaves a pause the user asked for alone.
+            if (session) session.userPaused = !shouldPlay;
             if (shouldPlay) {
                 video.play().catch((e) => dbg('cmd', `play() rejected: ${e.message || e}`, 'warn'));
                 dbg('cmd', 'PLAY');
@@ -890,7 +1346,7 @@
             hideError();
             cleanup();
             showLoading(t('retrying'));
-            const { url, contentType } = lastLoad;
+            const { url, contentType, isLive } = lastLoad;
             // resumeV2: pick up where playback actually broke, not at the
             // original LOAD start time.
             const startTime = (feature('resumeV2') && lastKnownTime > lastLoad.startTime)
@@ -899,11 +1355,16 @@
             if (startTime !== lastLoad.startTime) dbg('retry', `resuming at ${startTime}s`);
             armStartTimeGuard(startTime);
             const isHls = url.includes('.m3u8') || (contentType || '').includes('mpegurl');
-            if (isHls && Hls.isSupported()) {
-                tryHlsJs(url, startTime, (codeLine, kind) => {
-                    showError({ codeLine, kind });
-                });
+            const liveTs = !isHls && isLiveTs(url, isLive);
+            // A fresh session: a provider wait starts over, and nothing is
+            // pending in CAF (it considers the load done).
+            const s = newSession({ url, contentType, startTime, isLive });
+            if ((isHls || liveTs) && window.Hls && Hls.isSupported()) {
+                s.engine = 'hls';
+                if (liveTs) s.hlsUrl = tsToM3u8(url);
+                startHls(s);
             } else {
+                s.engine = 'native';
                 // For native, set the src directly — CAF isn't in the loop
                 // for retries so there's no risk of a duplicate load here.
                 video.src = url;
