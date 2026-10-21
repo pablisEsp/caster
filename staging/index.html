@@ -728,7 +728,20 @@
             dropHls();
             dbg('fail', `${kind || 'generic'} · ${codeLine || '-'}`, 'err');
             showError({ kind, codeLine, detail, status });
-            settleFail(s);
+            settleLoadForFailure(s);
+        }
+
+        // Whether a failure fails CAF's LOAD. Senders that handle it say so
+        // (`features.loadFailure`, from app 1.5.1) and get LOAD_FAILED. Older
+        // ones (≤ 1.5.0) disconnect on it — taking the explanation off the TV
+        // within seconds — and mishandle a channel switch made in the
+        // meantime (a stale delayed disconnect kills the new channel; a load
+        // that times out after that disconnect leaves them "casting" with no
+        // session). For them the LOAD succeeds and the screen explains; the
+        // session stays up, so picking another channel just works.
+        function settleLoadForFailure(s) {
+            if (feature('loadFailure')) settleFail(s);
+            else settleOk(s);
         }
 
         const isTsUrl = (u) => /\.ts(?=$|[?#])/i.test(u);
@@ -830,7 +843,11 @@
                         // Neither the vendored copy nor the CDN fallback loaded.
                         const s = newSession({ url, contentType, startTime, isLive });
                         failSession(s, { kind: 'playerLoad', codeLine: 'HLS.JS NOT LOADED' });
-                        return loadFailedError();
+                        // As settleLoadForFailure(): only senders that handle
+                        // a failed LOAD get one. An HLS request resolved with
+                        // skipPlayersLoad leaves the element (and the error
+                        // screen) alone.
+                        return feature('loadFailure') ? loadFailedError() : request;
                     }
                     if (Hls.isSupported()) {
                         return loadWithHlsJs(request, { url, contentType, startTime, isLive, liveTs });
