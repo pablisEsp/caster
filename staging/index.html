@@ -697,6 +697,21 @@
             resolve(loadFailedError());
         }
 
+        // Called from inside hls.js's own event callbacks (ERROR,
+        // BUFFER_CODECS…): destroying it there makes the code that emitted the
+        // event crash on the torn-down instance ("Cannot read property
+        // 'trigger' of null"). Detach it now — our handlers check `hls` — and
+        // destroy it once that code has returned. (cleanup() and startHls()
+        // never run inside a callback and destroy synchronously.)
+        function dropHls() {
+            const h = hls;
+            if (!h) return;
+            hls = null;
+            setTimeout(() => {
+                try { h.destroy(); } catch (e) { dbg('hls', `destroy: ${e.message || e}`, 'warn'); }
+            }, 0);
+        }
+
         // Terminal: error screen, and LOAD_FAILED if CAF still waits (the
         // sender then reports the failure instead of "casting").
         function failSession(s, { kind, codeLine, detail, status } = {}) {
@@ -704,7 +719,7 @@
             s.failed = true;
             s.timers.forEach(clearTimeout);
             s.timers.clear();
-            if (hls) { hls.destroy(); hls = null; }
+            dropHls();
             dbg('fail', `${kind || 'generic'} · ${codeLine || '-'}`, 'err');
             showError({ kind, codeLine, detail, status });
             settleFail(s);
@@ -1074,7 +1089,7 @@
                 s.slotWaitStartedAt = now;
                 dbg('slot', `${summary} → waiting for the provider to free the connection`, 'warn');
             }
-            if (hls) { hls.destroy(); hls = null; }
+            dropHls();
             if (now - s.slotWaitStartedAt >= SLOT_WAIT_MS) {
                 failSession(s, {
                     kind: status === 429 ? 'rateLimit' : 'connLimit',
@@ -1109,7 +1124,7 @@
                 disarmStartTimeGuard();
                 showLoading(t('reconnecting'));
             }
-            if (hls) { hls.destroy(); hls = null; }
+            dropHls();
             s.networkRecovered = false;
             later(s, 1000, () => startHls(s));
             return true;
@@ -1121,7 +1136,7 @@
         // (some TVs) just play it.
         function fallBackToTs(s, summary) {
             dbg('engine', `${summary} → no HLS, trying the .ts natively`, 'warn');
-            if (hls) { hls.destroy(); hls = null; }
+            dropHls();
             s.hlsUrl = null;
             s.engine = 'native';
             const onError = () => {
