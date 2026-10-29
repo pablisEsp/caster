@@ -118,6 +118,8 @@
         /* ━━━━━━ Staging badge ━━━━━━ */
         /* Only rendered when this file is served from a /staging/ path, so
            the very same file can be promoted to production untouched. */
+        /* Tooling, not copy: left to right whatever the language. */
+        #staging-badge, #debug { direction: ltr; }
         #staging-badge {
             position: absolute; top: 16px; left: 16px;
             background: rgba(245, 158, 11, 0.9); color: #000;
@@ -207,93 +209,67 @@
     <script src="/caster/vendor/hls-1.5.7.min.js"></script>
     <script>window.Hls || document.write('<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"><\/script>');</script>
     <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+    <!-- The TV's copy in the app's languages (next to this page, so staging
+         and production each carry their own). -->
+    <script src="strings.js"></script>
     <script>
         'use strict';
 
-        // English and Spanish. The language follows the sender's locale when
-        // it sends one (`customData.locale`) and the device's otherwise.
-        const STRINGS = {
+        // English here, the other 27 languages of the app in strings.js
+        // (`window.NIPA_STRINGS`, built from i18n/*.json by
+        // tools/build_strings.py): the TV says what the phone says, in the
+        // app's language. A missing file or key falls back to English. The
+        // language follows the sender's locale when it sends one (hello,
+        // LOAD) and the device's otherwise.
+        const STRINGS = Object.assign({
             en: {
-                loading: 'Loading...',
-                buffering: 'Buffering...',
-                retrying: 'Retrying...',
-                reconnecting: 'Reconnecting...',
-                seeking: 'Seeking…',
-                seekingSlow: 'Seeking — this may take a moment',
-                seekingStuck: 'Seek is taking too long — the server may not support this position. Try a different moment or stop casting.',
-                readyTitle: 'Ready to cast',
-                readySubtitle: 'Pick a channel or video on your phone to start streaming.',
-                waitingProviderTitle: 'Waiting for your IPTV provider…',
-                waitingProviderDetail: "The provider is refusing a second connection right now — usually because your plan allows one device at a time and the phone you cast from is still using it. It frees up within a minute or two, and this will start on its own.",
-                errorTitle: 'Stream unavailable',
-                errorSubtitle: "The provider's server isn't responding. This isn't an app issue — try another channel or check back later.",
-                codecTitle: "This device can't play this channel",
-                codecSubtitle: "It doesn't support the channel's video format. Newer Chromecasts and TVs with Google Cast built in usually can.",
-                codecDetail: 'The channel is in {format}.',
-                formatAvcHighLevel: '1080p at 50/60 fps (H.264 level {level})',
-                connLimitTitle: 'Your IPTV plan allows one device at a time',
-                connLimitSubtitle: 'The provider kept refusing the TV because another device is still using your connection. Stop playback on your other devices and press Retry.',
-                rateLimitTitle: 'Provider is rate-limiting',
-                rateLimitSubtitle: "Your IPTV provider blocked too many requests at once. Wait a few minutes and try again, or use a different channel.",
-                authTitle: 'The provider refused this stream',
-                authSubtitle: "Your IPTV provider rejected the request (HTTP {status}). Your subscription may have expired, or the provider may block TV devices. This isn't an app issue.",
-                notFoundTitle: 'Channel not available',
-                notFoundSubtitle: "Your IPTV provider says this channel doesn't exist right now (HTTP {status}). Try another channel or check back later.",
+                loading: "Loading...",
+                buffering: "Buffering...",
+                retrying: "Retrying...",
+                reconnecting: "Reconnecting...",
+                seeking: "Seeking…",
+                seekingSlow: "Seeking — this may take a moment",
+                seekingStuck: "Seek is taking too long — the server may not support this position. Try a different moment or stop casting.",
+                readyTitle: "Ready to cast",
+                readySubtitle: "Pick a channel or video on your phone to start streaming.",
+                waitingProviderTitle: "Waiting for your provider…",
+                waitingProviderDetail: "Your provider is refusing another connection right now: all the ones your account allows are in use, often by the phone you just cast from. It frees up within a minute or two, and this will start on its own.",
+                errorTitle: "The TV couldn't play this",
+                errorSubtitle: "Try again, or watch it on your phone.",
+                networkTitle: "The TV can't reach your provider",
+                networkSubtitle: "Check the TV's internet connection, or try again in a while.",
+                codecTitle: "This TV can't play this channel",
+                codecSubtitle: "Its video is more demanding than this TV or Chromecast can decode. Watch it on your phone, or look for an HD or SD version.",
+                codecDetail: "The channel is in {format}.",
+                formatAvcHighLevel: "1080p at 50/60 fps (H.264 level {level})",
+                connLimitTitle: "Your account's connections are all in use",
+                connLimitSubtitle: "Your provider limits how many devices can watch at once. Stop playback on the other ones and press Retry.",
+                rateLimitTitle: "Your provider is limiting requests",
+                rateLimitSubtitle: "Wait a few minutes and try again.",
+                authTitle: "Your provider refused to play this on the TV",
+                authSubtitle: "It may not be in your package, your subscription may have expired, or your provider may block TVs. It may still play on your phone.",
+                notFoundTitle: "It's no longer on your provider's server",
+                notFoundSubtitle: "Your provider removed or moved it. Refresh the list on your phone or try another one.",
                 tsOnlyTitle: "This channel can't be cast",
-                tsOnlySubtitle: "Your provider only offers this channel in MPEG-TS, a format this device can't play. Watch it on your phone or try another channel.",
-                serverErrorTitle: "The provider's server is having issues",
-                serverErrorSubtitle: "The IPTV server returned a 5xx error. It's likely overloaded or down. Not an app issue — try again in a moment.",
-                playerLoadTitle: "Couldn't start the player",
-                playerLoadSubtitle: "The TV couldn't load the video player. Check its internet connection and try again.",
+                tsOnlySubtitle: "Your provider only offers it in a format the TV can't play. Watch it on your phone.",
+                serverErrorTitle: "Your provider's server has a problem",
+                serverErrorSubtitle: "It's not the app or the TV. Try again in a few minutes.",
+                playerLoadTitle: "The TV couldn't start its player",
+                playerLoadSubtitle: "Check the TV's internet connection and try again.",
                 audioOnly: "Playing sound only: this device can't read this channel's video (in IPTV usually MPEG-2 or HEVC), or the channel has no picture.",
-                undecodableTitle: "This device can't play this channel",
-                undecodableSubtitle: "Its video arrives in a form this device's player can't use — common with TV channels broadcast as interlaced 1080i. Watch it on your phone or try another channel.",
-                stalledTitle: 'The stream stopped',
-                stalledSubtitle: "The picture froze and couldn't recover. Press Retry, or pick the channel again on your phone.",
-                retry: 'Retry',
+                undecodableTitle: "This TV can't play this channel",
+                undecodableSubtitle: "It's broadcast in a form the TV's player can't read (common with interlaced 1080i channels). Watch it on your phone.",
+                stalledTitle: "The picture froze",
+                stalledSubtitle: "It couldn't recover on its own. Press Retry, or watch it on your phone.",
+                retry: "Retry",
             },
-            es: {
-                loading: 'Cargando...',
-                buffering: 'Cargando...',
-                retrying: 'Reintentando...',
-                reconnecting: 'Reconectando...',
-                seeking: 'Saltando…',
-                seekingSlow: 'Saltando — puede tardar un momento',
-                seekingStuck: 'El salto está tardando demasiado: puede que el servidor no admita esta posición. Prueba otro momento o deja de enviar.',
-                readyTitle: 'Listo para enviar',
-                readySubtitle: 'Elige un canal o un vídeo en el móvil para empezar.',
-                waitingProviderTitle: 'Esperando a tu proveedor IPTV…',
-                waitingProviderDetail: 'El proveedor está rechazando una segunda conexión: normalmente tu plan solo permite un dispositivo a la vez y el móvil desde el que envías aún la está usando. Se libera en un minuto o dos y esto empezará solo.',
-                errorTitle: 'Emisión no disponible',
-                errorSubtitle: 'El servidor del proveedor no responde. No es un problema de la app: prueba otro canal o vuelve a intentarlo más tarde.',
-                codecTitle: 'Este dispositivo no puede reproducir este canal',
-                codecSubtitle: 'No admite el formato de vídeo del canal. Los Chromecast más nuevos y los televisores con Google Cast integrado suelen poder.',
-                codecDetail: 'El canal está en {format}.',
-                formatAvcHighLevel: '1080p a 50/60 fps (H.264 nivel {level})',
-                connLimitTitle: 'Tu plan IPTV solo permite un dispositivo a la vez',
-                connLimitSubtitle: 'El proveedor ha seguido rechazando la tele porque otro dispositivo usa tu conexión. Deja de reproducir en los demás dispositivos y pulsa Reintentar.',
-                rateLimitTitle: 'El proveedor está limitando las peticiones',
-                rateLimitSubtitle: 'Tu proveedor IPTV ha bloqueado demasiadas peticiones a la vez. Espera unos minutos y vuelve a intentarlo, o prueba otro canal.',
-                authTitle: 'El proveedor ha rechazado esta emisión',
-                authSubtitle: 'Tu proveedor IPTV ha rechazado la petición (HTTP {status}). Puede que tu suscripción haya caducado o que el proveedor bloquee los televisores. No es un problema de la app.',
-                notFoundTitle: 'Canal no disponible',
-                notFoundSubtitle: 'Tu proveedor IPTV dice que este canal no existe ahora mismo (HTTP {status}). Prueba otro canal o vuelve más tarde.',
-                tsOnlyTitle: 'Este canal no se puede enviar',
-                tsOnlySubtitle: 'Tu proveedor solo ofrece este canal en MPEG-TS, un formato que este dispositivo no puede reproducir. Míralo en el móvil o prueba otro canal.',
-                serverErrorTitle: 'El servidor del proveedor tiene problemas',
-                serverErrorSubtitle: 'El servidor IPTV ha devuelto un error 5xx. Seguramente está saturado o caído. No es un problema de la app: vuelve a intentarlo en un momento.',
-                playerLoadTitle: 'No se pudo iniciar el reproductor',
-                playerLoadSubtitle: 'La tele no ha podido cargar el reproductor de vídeo. Comprueba su conexión a internet y vuelve a intentarlo.',
-                audioOnly: 'Solo se reproduce el sonido: este dispositivo no puede leer el vídeo de este canal (en IPTV suele ser MPEG-2 o HEVC), o el canal no tiene imagen.',
-                undecodableTitle: 'Este dispositivo no puede reproducir este canal',
-                undecodableSubtitle: 'Su vídeo llega de una forma que el reproductor de este dispositivo no puede usar; pasa a menudo con canales de televisión emitidos en 1080i entrelazado. Míralo en el móvil o prueba otro canal.',
-                stalledTitle: 'La emisión se ha parado',
-                stalledSubtitle: 'La imagen se ha quedado congelada y no se ha podido recuperar. Pulsa Reintentar o vuelve a elegir el canal en el móvil.',
-                retry: 'Reintentar',
-            },
-        };
+        }, (typeof window !== 'undefined' && window.NIPA_STRINGS) || {});
+        // Written right to left.
+        const RTL = ['ar', 'ur'];
         const pickLang = (locale) => {
-            const code = String(locale || '').slice(0, 2).toLowerCase();
+            let code = String(locale || '').split(/[-_]/)[0].toLowerCase();
+            // Norwegian: the app speaks Bokmål ("nb"); devices may say "no".
+            if (code === 'no' || code === 'nn') code = 'nb';
             return STRINGS[code] ? code : 'en';
         };
         let LANG = pickLang(navigator.language);
@@ -315,8 +291,19 @@
         // strings are placeholders for the default English render before
         // JS runs; once we boot we replace them so the receiver respects
         // STRINGS / LANG (future i18n).
-        readyTitleEl.textContent = t('readyTitle');
-        readySubtitleEl.textContent = t('readySubtitle');
+        // The page's language and direction, and the copy already on screen
+        // that doesn't change on its own (the "Ready to cast" screen).
+        function applyLang(locale) {
+            LANG = pickLang(locale);
+            const root = document.documentElement;
+            if (root) {
+                root.lang = LANG;
+                root.dir = RTL.includes(LANG) ? 'rtl' : 'ltr';
+            }
+            readyTitleEl.textContent = t('readyTitle');
+            readySubtitleEl.textContent = t('readySubtitle');
+        }
+        applyLang(navigator.language);
 
         let hls = null;
 
@@ -368,7 +355,7 @@
             // previous sender).
             const nipa = (custom.nipa && typeof custom.nipa === 'object') ? custom.nipa : {};
             nipaLoadId = typeof nipa.loadId === 'string' ? nipa.loadId : null;
-            LANG = pickLang(nipa.locale || custom.locale || navigator.language);
+            applyLang(nipa.locale || custom.locale || navigator.language);
             const on = Object.keys(activeFeatures).filter(feature).join(',') || '-';
             dbg('sender', senderInfo
                 ? `${senderInfo.app} ${senderInfo.version} (${senderInfo.platform}) features=${on}`
@@ -492,8 +479,8 @@
             noticeEl.classList.add('hidden');
         }
 
-        // Error copy by `kind`; anything else gets the generic "Stream
-        // unavailable" message.
+        // Error copy by `kind`; anything else gets the generic "The TV
+        // couldn't play this" message.
         //   'codec'       → this device can't decode the channel's format
         //   'connLimit'   → provider kept refusing a second connection
         //   'rateLimit'   → provider kept answering HTTP 429
@@ -505,9 +492,11 @@
         //   'undecodable' → fragments arrive but nothing playable is buffered
         //   'stalled'     → the picture froze, never started, or the decoder
         //                   failed, and rebuilding didn't help
+        //   'network'     → the provider can't be reached (no HTTP answer)
         const ERROR_KINDS = [
             'codec', 'connLimit', 'rateLimit', 'auth', 'notFound',
             'tsOnly', 'serverError', 'playerLoad', 'undecodable', 'stalled',
+            'network',
         ];
 
         function showError({ codeLine, kind, detail, status }) {
@@ -677,7 +666,7 @@
             const data = event && event.data;
             if (!data || data.type !== 'hello') return;
             dbg('nipa', `hello from ${data.app || '?'} ${data.version || '?'} (${data.platform || '?'})`);
-            if (data.locale) LANG = pickLang(data.locale);
+            if (data.locale) applyLang(data.locale);
             sendToApps({ type: 'hello', v: 1, rx: RX_VERSION, caps: probeCaps() }, event.senderId);
             // An app that (re)joins mid-channel learns where things stand.
             if (session) sendToApps(statusOf(session, session.lastExtra), event.senderId);
@@ -840,7 +829,7 @@
             s.timers.clear();
             dropHls();
             dbg('fail', `${kind || 'generic'} · ${codeLine || '-'}`, 'err');
-            showError({ kind, codeLine, detail, status });
+            showError({ kind: kind || reason, codeLine, detail, status });
             const failure = { kind: reason || kind || 'network' };
             if (status) failure.http = status;
             if (kind === 'codec' && s.codecMime) failure.detail = s.codecMime;

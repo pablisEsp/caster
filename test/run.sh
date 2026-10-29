@@ -17,4 +17,7 @@ scripts = re.findall(r'<script>(.*?)</script>', html, re.S)
 open(sys.argv[2], 'w').write(max(scripts, key=len))
 PY
 node --check "$TMP"
-node test/receiver_harness.js "$TMP" "$LOCALE"
+# The page's copy in the app's languages, next to it; up to date with i18n/.
+STRINGS="$(dirname "$PAGE")/strings.js"
+if [ "$PAGE" = staging/index.html ]; then python3 tools/build_strings.py --check; fi
+node test/receiver_harness.js "$TMP" "$LOCALE" "$STRINGS"

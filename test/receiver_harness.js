@@ -7,6 +7,8 @@ const assert = require('assert');
 
 const SRC = fs.readFileSync(process.argv[2], 'utf8');
 const LANG = process.argv[3] || 'es-ES';
+// The page's strings.js (the copy in the app's languages), when there is one.
+const STRINGS_SRC = process.argv[4] && fs.existsSync(process.argv[4]) ? fs.readFileSync(process.argv[4], 'utf8') : null;
 
 function makeClassList() {
   const set = new Set();
@@ -127,7 +129,7 @@ function setup() {
   const ctx = {
     console, URL, URLSearchParams, Promise, Date: { now: () => clock.now() },
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, setInterval: clock.setInterval,
-    document: { getElementById: getEl },
+    document: { getElementById: getEl, documentElement: { lang: 'en', dir: 'ltr' } },
     navigator: { language: LANG },
     location: { search: '', pathname: '/caster/staging/' },
     addEventListener() {},
@@ -136,6 +138,7 @@ function setup() {
   };
   ctx.window = ctx;
   vm.createContext(ctx);
+  if (STRINGS_SRC) vm.runInContext(STRINGS_SRC, ctx);
   vm.runInContext(SRC, ctx);
   const ev = (expr) => vm.runInContext(expr, ctx);
   const statuses = () => sent.filter((x) => x.msg.type === 'status').map((x) => x.msg);
@@ -173,7 +176,7 @@ test('458 on the manifest: waits with the reason, retries, then plays', async ()
   h1.emit('hlsError', err('manifestLoadError', { status: 458 }));
   let o = overlay(env);
   assert(o.loading && o.loadingText.startsWith('Esperando a tu proveedor'), JSON.stringify(o));
-  assert(o.loadingDetail.includes('un dispositivo a la vez'));
+  assert(o.loadingDetail.includes('todas las que permite tu cuenta están en uso'), o.loadingDetail);
   assert.strictEqual(env.ev('hls'), null, 'detached at once');
   assert(!h1.destroyed, 'destroyed only after its callback returned');
   env.clock.advance(0);
@@ -192,7 +195,7 @@ test('458 on the manifest: waits with the reason, retries, then plays', async ()
   assert(env.ev('session.hasPlayed'));
 });
 
-test('458 for longer than 3 min ends on the one-device screen', async () => {
+test('458 for longer than 3 min ends on the account-busy screen', async () => {
   const env = setup();
   watch(env.interceptors.LOAD(loadReq('http://p.example/live/u/p/1.m3u8')));
   for (let i = 0; i < 40 && !overlay(env).error; i++) {
@@ -200,19 +203,19 @@ test('458 for longer than 3 min ends on the one-device screen', async () => {
     env.clock.advance(15000);
   }
   const o = overlay(env);
-  assert(o.error && o.errorTitle.includes('un dispositivo a la vez'), JSON.stringify(o));
+  assert(o.error && o.errorTitle === 'Las conexiones de tu cuenta están todas en uso', JSON.stringify(o));
   assert(o.errorCode.includes('458'));
   const tries = env.instances.length;
   assert(tries >= 12 && tries <= 20, `retries ${tries}`);
 });
 
-test('404 on the manifest: "channel not available" and LOAD_FAILED', async () => {
+test('404 on the manifest: "no longer on your provider\'s server" and LOAD_FAILED', async () => {
   const env = setup();
   watch(env.interceptors.LOAD(loadReq('http://p.example/live/u/p/1.m3u8')));
   env.instances.at(-1).emit('hlsError', err('manifestLoadError', { status: 404 }));
   await flush();
   const o = overlay(env);
-  assert(o.error && o.errorTitle === 'Canal no disponible' && o.errorSubtitle.includes('HTTP 404'), JSON.stringify(o));
+  assert(o.error && o.errorTitle === 'Ya no está en el servidor de tu proveedor' && o.errorCode.includes('404'), JSON.stringify(o));
   assert(settled && settled.media, 'sender without loadFailure: the LOAD succeeds, the TV explains');
 });
 
@@ -221,10 +224,10 @@ test('403 on the manifest: provider refused', async () => {
   watch(env.interceptors.LOAD(loadReq('http://p.example/live/u/p/1.m3u8')));
   env.instances.at(-1).emit('hlsError', err('manifestLoadError', { status: 403 }));
   const o = overlay(env);
-  assert(o.error && o.errorTitle.startsWith('El proveedor ha rechazado'), JSON.stringify(o));
+  assert(o.error && o.errorTitle === 'Tu proveedor no deja reproducir esto en la tele', JSON.stringify(o));
 });
 
-test('no status (CORS/network): one rebuild, then the generic error', async () => {
+test('no status (CORS/network): rebuilds, then "can\'t reach your provider"', async () => {
   const env = setup();
   watch(env.interceptors.LOAD(loadReq('http://p.example/live/u/p/1.m3u8')));
   for (let i = 0; i < 4; i++) {
@@ -232,7 +235,7 @@ test('no status (CORS/network): one rebuild, then the generic error', async () =
     env.clock.advance(1000);
   }
   const o = overlay(env);
-  assert(o.error && o.errorTitle === 'Emisión no disponible', JSON.stringify(o));
+  assert(o.error && o.errorTitle === 'La tele no consigue conectar con tu proveedor', JSON.stringify(o));
   assert.strictEqual(env.instances.length, 4, '1 + 3 rebuilds');
 });
 
@@ -244,7 +247,7 @@ test('codec refused (1080p50, level 4.2): codec screen naming the format', async
   h.emit('hlsError', err('bufferAddCodecError', { fatal: false, type: 'mediaError', mimeType: 'video/mp4;codecs=avc1.4d402a' }));
   await flush();
   const o = overlay(env);
-  assert(o.error && o.errorTitle === 'Este dispositivo no puede reproducir este canal', JSON.stringify(o));
+  assert(o.error && o.errorTitle === 'Esta tele no puede reproducir este canal', JSON.stringify(o));
   assert(o.errorSubtitle.includes('1080p a 50/60 fps (H.264 nivel 4.2)'), o.errorSubtitle);
   assert(settled && settled.media, 'sender without loadFailure: the LOAD succeeds, the TV explains');
   // A late incompatible-codecs error from the same instance is ignored.
@@ -377,7 +380,7 @@ test('fragments buffered but nothing playable (1080i fields): undecodable after 
   h.emit('hlsFragBuffered', { frag: { type: 'main', sn: 200 } });
   await flush();
   const o = overlay(env);
-  assert(o.error && o.errorTitle === 'Este dispositivo no puede reproducir este canal', JSON.stringify(o));
+  assert(o.error && o.errorTitle === 'Esta tele no puede reproducir este canal', JSON.stringify(o));
   assert(o.errorSubtitle.includes('1080i entrelazado'));
   assert(settled && settled.media, 'sender without loadFailure: the LOAD succeeds, the TV explains');
   env.clock.advance(0);
@@ -583,7 +586,26 @@ test('status-channel app: frozen and never-started name themselves, with their o
   const st = last(env);
   assert.strictEqual(st.state, 'failed');
   assert.strictEqual(st.failure.kind, 'noPlayback');
-  assert.strictEqual(overlay(env).errorTitle, 'The stream stopped', 'in the app\'s language (en-GB)');
+  assert.strictEqual(overlay(env).errorTitle, 'The picture froze', 'in the app\'s language (en-GB)');
+});
+
+test("the app's language: every one of them, right to left where it's written so", async () => {
+  const env = setup();
+  const root = env.ctx.document.documentElement;
+  const langs = Object.keys(env.ev('STRINGS'));
+  assert(langs.length >= 28, `languages ${langs.length}`);
+  env.fromApp({ type: 'hello', v: 1, app: 'nipa', version: '1.5.1', platform: 'ios', locale: 'ar' });
+  assert.strictEqual(root.dir, 'rtl');
+  assert.strictEqual(root.lang, 'ar');
+  assert.notStrictEqual(env.els['ready-title'].textContent, 'Ready to cast', 'the ready screen follows');
+  env.fromApp({ type: 'hello', v: 1, app: 'nipa', version: '1.5.1', platform: 'android', locale: 'no-NO' });
+  assert.strictEqual(root.lang, 'nb');
+  assert.strictEqual(root.dir, 'ltr');
+  env.fromApp({ type: 'hello', v: 1, app: 'nipa', version: '1.5.1', platform: 'ios', locale: 'pt-BR' });
+  assert.strictEqual(root.lang, 'pt');
+  env.fromApp({ type: 'hello', v: 1, app: 'nipa', version: '1.5.1', platform: 'ios', locale: 'xx' });
+  assert.strictEqual(root.lang, 'en');
+  assert.strictEqual(env.els['ready-title'].textContent, 'Ready to cast');
 });
 
 test('status: an app that joins mid-channel gets the current state; a new LOAD has its own id', async () => {
