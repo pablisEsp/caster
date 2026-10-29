@@ -97,12 +97,24 @@ function setup() {
 
   // ── CAF fake ──
   const interceptors = {};
+  const customListeners = {};
+  const sent = [];            // {ns, to, msg} from context.sendCustomMessage
+  let startOptions = null;
+  // What this fake device decodes: MSE types and canDisplayType answers.
+  const device = {
+    mse: new Set(['video/mp4; codecs="avc1.64001F"', 'video/mp4; codecs="avc1.640028"', 'video/mp4; codecs="avc1.640029"', 'audio/mp4; codecs="ac-3"']),
+    display: (codecs, w, h, fps) => !(fps > 30 && h >= 1080) && h <= 1080,
+  };
   class ErrorData { constructor(type) { this.type = type; } }
   const cast = { framework: {
     CastReceiverContext: { getInstance: () => ({
       getPlayerManager: () => ({ setMessageInterceptor: (t, fn) => { interceptors[t] = fn; }, broadcastStatus() {} }),
-      start() {},
+      start(options) { startOptions = options; },
+      addCustomMessageListener: (ns, fn) => { customListeners[ns] = fn; },
+      sendCustomMessage: (ns, to, msg) => { sent.push({ ns, to, msg: JSON.parse(JSON.stringify(msg)) }); },
+      canDisplayType: (mime, codecs, w, h, fps) => device.display(codecs, w, h, fps),
     }) },
+    system: { MessageType: { JSON: 'JSON' } },
     CastReceiverOptions: class {},
     messages: {
       MessageType: { LOAD: 'LOAD', PLAY: 'PLAY', PAUSE: 'PAUSE', SEEK: 'SEEK' },
@@ -120,12 +132,15 @@ function setup() {
     location: { search: '', pathname: '/caster/staging/' },
     addEventListener() {},
     cast, Hls,
+    MediaSource: { isTypeSupported: (t) => device.mse.has(t) },
   };
   ctx.window = ctx;
   vm.createContext(ctx);
   vm.runInContext(SRC, ctx);
   const ev = (expr) => vm.runInContext(expr, ctx);
-  return { ctx, ev, clock, video, els, instances, interceptors, Hls };
+  const statuses = () => sent.filter((x) => x.msg.type === 'status').map((x) => x.msg);
+  const fromApp = (data, senderId = 'app-1') => customListeners['urn:x-cast:com.nipaplayer.cast']({ senderId, data });
+  return { ctx, ev, clock, video, els, instances, interceptors, Hls, sent, statuses, fromApp, device, startOptions: () => startOptions };
 }
 
 function loadReq(url, { contentType = 'application/x-mpegURL', live = true, features = { resumeV2: true, seekV2: true } } = {}) {
@@ -473,6 +488,142 @@ test('a stream that plays, freezes, and recovers keeps being rebuilt over time',
   assert(!env.ev("session.failed"), "session still alive");
   assert(!overlay(env).error, "rebuilds spread over time are not capped");
   assert.strictEqual(env.instances.length, 6, 'one rebuild per freeze');
+});
+
+// ── Status channel (protocol v1) ──
+
+const NIPA = { resumeV2: true, seekV2: true, nipaStatus: true };
+function nipaReq(url, loadId, extra = {}) {
+  const r = loadReq(url, { features: NIPA, ...extra });
+  r.customData.nipa = { v: 1, loadId, locale: 'en-GB' };
+  return r;
+}
+const last = (env) => env.statuses().at(-1);
+
+test('hello: the receiver answers with its version and what the device decodes', async () => {
+  const env = setup();
+  assert.deepStrictEqual(Object.keys(env.startOptions().customNamespaces), ['urn:x-cast:com.nipaplayer.cast']);
+  env.fromApp({ type: 'hello', v: 1, app: 'nipa', version: '1.5.1', platform: 'ios', locale: 'es-ES' });
+  const hello = env.sent.find((x) => x.msg.type === 'hello');
+  assert(hello && hello.to === 'app-1', 'answered to that app');
+  assert.strictEqual(hello.msg.v, 1);
+  assert(/^\d{4}-\d{2}-\d{2}\.\d+$/.test(hello.msg.rx), hello.msg.rx);
+  const caps = hello.msg.caps;
+  assert.strictEqual(caps.h264MaxLevel, '4.1', 'like a 2nd-gen Chromecast');
+  assert.strictEqual(caps.fhd60, false);
+  assert.strictEqual(caps.hevc, false);
+  assert.strictEqual(caps.ac3, true);
+  assert.strictEqual(caps.eac3, false);
+  assert.deepStrictEqual(caps.tsVideo, ['h264']);
+});
+
+test('status-channel app: LOAD resolved at once; starting → buffering → playing, with its load id', async () => {
+  const env = setup();
+  watch(env.interceptors.LOAD(nipaReq('http://p.example/live/u/p/1.m3u8', 'L1')));
+  await flush();
+  assert(settled && settled.media, 'resolved before any picture');
+  assert.strictEqual(last(env).state, 'starting');
+  env.instances.at(-1).emit('hlsManifestParsed', { levels: [{ videoCodec: 'avc1.640028', audioCodec: 'mp4a.40.2' }] });
+  assert.strictEqual(last(env).state, 'buffering');
+  env.video.videoWidth = 1280; env.video.videoHeight = 720;
+  env.video.fire('playing');
+  const st = last(env);
+  assert.strictEqual(st.state, 'playing');
+  assert.strictEqual(st.loadId, 'L1');
+  assert.deepStrictEqual(st.stream.video, { w: 1280, h: 720, codec: 'avc1.640028' });
+  assert.strictEqual(st.stream.via, 'm3u8');
+  const seqs = env.statuses().map((x) => x.seq);
+  assert(seqs.every((v, i) => i === 0 || v > seqs[i - 1]), 'seq increases');
+  assert(!overlay(env).loading, 'the picture is up');
+});
+
+test('status-channel app: a busy provider is a wait, with how long and when it gives up', async () => {
+  const env = setup();
+  watch(env.interceptors.LOAD(nipaReq('http://p.example/live/u/p/1.m3u8', 'L2')));
+  env.instances.at(-1).emit('hlsError', err('manifestLoadError', { status: 458 }));
+  let st = last(env);
+  assert.strictEqual(st.state, 'waitingSlot');
+  assert.strictEqual(st.wait.http, 458);
+  assert.strictEqual(st.wait.attempts, 0);
+  assert(st.wait.giveUpInMs > 170000);
+  env.clock.advance(5000);                       // heartbeat during the wait
+  st = last(env);
+  assert.strictEqual(st.state, 'waitingSlot');
+  assert(st.wait.sinceMs >= 5000, 'the heartbeat refreshes the wait');
+  env.instances.at(-1).emit('hlsManifestParsed', { levels: [{}] });
+  env.video.fire('playing');
+  assert.strictEqual(last(env).state, 'playing');
+  assert(!last(env).wait, 'the wait is over');
+});
+
+test('status-channel app: failures carry their kind and never fail the LOAD', async () => {
+  const cases = [
+    [(h) => h.emit('hlsError', err('manifestLoadError', { status: 404 })), { kind: 'notFound', http: 404 }],
+    [(h) => h.emit('hlsError', err('manifestLoadError', { status: 403 })), { kind: 'auth', http: 403 }],
+    [(h) => h.emit('hlsError', err('bufferAddCodecError', { fatal: false, type: 'mediaError', mimeType: 'video/mp4;codecs=avc1.4d402a' })),
+      { kind: 'codec', detail: 'video/mp4;codecs=avc1.4d402a' }],
+  ];
+  for (const [fail, want] of cases) {
+    const env = setup();
+    watch(env.interceptors.LOAD(nipaReq('http://p.example/live/u/p/1.m3u8', 'L3')));
+    fail(env.instances.at(-1));
+    await flush();
+    assert(settled && settled.media && settled.type !== 'LOAD_FAILED', 'resolved, not LOAD_FAILED');
+    const st = last(env);
+    assert.strictEqual(st.state, 'failed');
+    assert.deepStrictEqual(st.failure, want);
+    assert(overlay(env).error, 'the TV explains too');
+  }
+});
+
+test('status-channel app: frozen and never-started name themselves, with their own TV copy', async () => {
+  const env = setup();
+  watch(env.interceptors.LOAD(nipaReq('http://p.example/live/u/p/1.m3u8', 'L4')));
+  for (let i = 0; i < 4; i++) env.clock.advance(50000);
+  const st = last(env);
+  assert.strictEqual(st.state, 'failed');
+  assert.strictEqual(st.failure.kind, 'noPlayback');
+  assert.strictEqual(overlay(env).errorTitle, 'The stream stopped', 'in the app\'s language (en-GB)');
+});
+
+test('status: an app that joins mid-channel gets the current state; a new LOAD has its own id', async () => {
+  const env = setup();
+  watch(env.interceptors.LOAD(nipaReq('http://p.example/live/u/p/1.m3u8', 'A')));
+  env.instances.at(-1).emit('hlsError', err('manifestLoadError', { status: 458 }));
+  env.fromApp({ type: 'hello', v: 1 }, 'app-2');
+  const toNew = env.sent.filter((x) => x.to === 'app-2').map((x) => x.msg);
+  assert.strictEqual(toNew.length, 2, 'hello + current status');
+  assert.strictEqual(toNew[1].state, 'waitingSlot');
+  assert.strictEqual(toNew[1].loadId, 'A');
+  watch(env.interceptors.LOAD(nipaReq('http://p.example/live/u/p/2.m3u8', 'B')));
+  assert.strictEqual(last(env).loadId, 'B');
+  assert.strictEqual(last(env).state, 'starting');
+  env.clock.advance(20000);
+  assert(env.statuses().filter((x) => x.loadId === 'A').every((x) => x.seq < last(env).seq), 'nothing more about A');
+});
+
+test('status: live .ts goes out as its .m3u8 and says so; no URL in any message', async () => {
+  const env = setup();
+  watch(env.interceptors.LOAD(nipaReq('http://p.example/live/user/secret/9.ts', 'T', { contentType: 'video/mp2t' })));
+  env.instances.at(-1).emit('hlsManifestParsed', { levels: [{}] });
+  env.instances.at(-1).emit('hlsBufferCodecs', { video: { codec: 'avc1.64001f' }, audio: { codec: 'mp4a.40.2' } });
+  env.video.fire('playing');
+  assert.strictEqual(last(env).stream.via, 'ts-sibling');
+  assert.strictEqual(last(env).stream.video.codec, 'avc1.64001f', 'from the demuxer when the playlist says nothing');
+  const all = JSON.stringify(env.sent);
+  assert(!/secret|p\.example|http/i.test(all), 'no URL or credential leaves the TV');
+});
+
+test('legacy app: no load id, LOAD semantics unchanged (resolved on the first picture)', async () => {
+  const env = setup();
+  watch(env.interceptors.LOAD(loadReq('http://p.example/live/u/p/1.m3u8')));
+  await flush();
+  assert.strictEqual(settled, undefined, 'still pending, as before');
+  assert.strictEqual(last(env).loadId, null);
+  env.instances.at(-1).emit('hlsManifestParsed', { levels: [{}] });
+  env.video.fire('playing');
+  await flush();
+  assert(settled && settled.media);
 });
 
 (async () => {

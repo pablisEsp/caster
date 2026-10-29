@@ -248,6 +248,8 @@
                 audioOnly: "Playing sound only: this device can't read this channel's video (in IPTV usually MPEG-2 or HEVC), or the channel has no picture.",
                 undecodableTitle: "This device can't play this channel",
                 undecodableSubtitle: "Its video arrives in a form this device's player can't use — common with TV channels broadcast as interlaced 1080i. Watch it on your phone or try another channel.",
+                stalledTitle: 'The stream stopped',
+                stalledSubtitle: "The picture froze and couldn't recover. Press Retry, or pick the channel again on your phone.",
                 retry: 'Retry',
             },
             es: {
@@ -285,6 +287,8 @@
                 audioOnly: 'Solo se reproduce el sonido: este dispositivo no puede leer el vídeo de este canal (en IPTV suele ser MPEG-2 o HEVC), o el canal no tiene imagen.',
                 undecodableTitle: 'Este dispositivo no puede reproducir este canal',
                 undecodableSubtitle: 'Su vídeo llega de una forma que el reproductor de este dispositivo no puede usar; pasa a menudo con canales de televisión emitidos en 1080i entrelazado. Míralo en el móvil o prueba otro canal.',
+                stalledTitle: 'La emisión se ha parado',
+                stalledSubtitle: 'La imagen se ha quedado congelada y no se ha podido recuperar. Pulsa Reintentar o vuelve a elegir el canal en el móvil.',
                 retry: 'Reintentar',
             },
         };
@@ -345,6 +349,10 @@
         let senderInfo = null;
         let activeFeatures = {};
         const feature = (key) => activeFeatures[key] === true;
+        // The sender's id for this LOAD (`customData.nipa.loadId`), echoed in
+        // every status so the app can tell this channel's news from the
+        // previous one's.
+        let nipaLoadId = null;
 
         function readSenderHandshake(request) {
             const custom = (request && request.customData) || {};
@@ -358,7 +366,9 @@
             // Senders from 1.5.1 send their UI locale; for older ones it's the
             // device's language (per LOAD, so it never sticks from a
             // previous sender).
-            LANG = pickLang(custom.locale || navigator.language);
+            const nipa = (custom.nipa && typeof custom.nipa === 'object') ? custom.nipa : {};
+            nipaLoadId = typeof nipa.loadId === 'string' ? nipa.loadId : null;
+            LANG = pickLang(nipa.locale || custom.locale || navigator.language);
             const on = Object.keys(activeFeatures).filter(feature).join(',') || '-';
             dbg('sender', senderInfo
                 ? `${senderInfo.app} ${senderInfo.version} (${senderInfo.platform}) features=${on}`
@@ -493,9 +503,11 @@
         //   'serverError' → HTTP 5xx
         //   'playerLoad'  → hls.js itself couldn't be loaded
         //   'undecodable' → fragments arrive but nothing playable is buffered
+        //   'stalled'     → the picture froze, never started, or the decoder
+        //                   failed, and rebuilding didn't help
         const ERROR_KINDS = [
             'codec', 'connLimit', 'rateLimit', 'auth', 'notFound',
-            'tsOnly', 'serverError', 'playerLoad', 'undecodable',
+            'tsOnly', 'serverError', 'playerLoad', 'undecodable', 'stalled',
         ];
 
         function showError({ codeLine, kind, detail, status }) {
@@ -578,6 +590,99 @@
         const context = cast.framework.CastReceiverContext.getInstance();
         const playerManager = context.getPlayerManager();
 
+        // ━━━━━━ NiPa status channel (protocol v1) ━━━━━━
+        //
+        // CAF's media status can't tell the app what is going on: on the
+        // hls.js path it stays BUFFERING while the picture plays, and a
+        // failure is at best a LOAD_FAILED with no reason. Apps that speak
+        // this protocol (from 1.5.1) get it on their own namespace:
+        //   app → TV  {type:'hello', v, app, version, platform, locale}
+        //   TV → app  {type:'hello', v, rx, caps}   what this device decodes
+        //   TV → app  {type:'status', v, loadId, seq, state, pos, dur,
+        //              wait?, failure?, stream}      on every change, and
+        //              every 5 s while a channel is on
+        // state: starting | waitingSlot | buffering | playing | paused |
+        //        reconnecting | failed | ended
+        // Never a URL. Older apps don't listen on the namespace: for them
+        // nothing changes.
+        const NIPA_NS = 'urn:x-cast:com.nipaplayer.cast';
+        const RX_VERSION = '2026-10-29.1';
+        let statusSeq = 0;
+        let capsCache = null;
+
+        function probeCaps() {
+            if (capsCache) return capsCache;
+            const mse = (type) => {
+                try { return !!(window.MediaSource && MediaSource.isTypeSupported(type)); } catch (_) { return false; }
+            };
+            const shows = (codecs, w, h, fps) => {
+                try { return !!context.canDisplayType('video/mp4', codecs, w, h, fps); } catch (_) { return null; }
+            };
+            // hls.js feeds MSE, so what MSE accepts is what plays.
+            let h264MaxLevel = null;
+            [['3.1', '1F'], ['4.0', '28'], ['4.1', '29'], ['4.2', '2A'], ['5.0', '32'], ['5.1', '33'], ['5.2', '34']]
+                .forEach(([level, hex]) => { if (mse(`video/mp4; codecs="avc1.6400${hex}"`)) h264MaxLevel = level; });
+            capsCache = {
+                h264MaxLevel,
+                fhd60: shows('avc1.64002A', 1920, 1080, 60),
+                uhd: shows('avc1.640033', 3840, 2160, 30),
+                hevc: mse('video/mp4; codecs="hvc1.1.6.L120.B0"'),
+                ac3: mse('audio/mp4; codecs="ac-3"'),
+                eac3: mse('audio/mp4; codecs="ec-3"'),
+                // What hls.js reads out of MPEG-TS, whatever the device.
+                tsVideo: ['h264'],
+            };
+            return capsCache;
+        }
+
+        function sendToApps(msg, senderId) {
+            try {
+                context.sendCustomMessage(NIPA_NS, senderId, msg);
+            } catch (e) {
+                dbg('nipa', `send failed: ${e.message || e}`, 'warn');
+            }
+        }
+
+        // What the app is told about session [s]; `extra` adds wait/failure.
+        function statusOf(s, extra) {
+            const live = s ? s.isLive : false;
+            return Object.assign({
+                type: 'status', v: 1,
+                loadId: s ? s.loadId : null,
+                seq: ++statusSeq,
+                state: s ? s.state : 'ended',
+                pos: Math.floor(video.currentTime || 0),
+                dur: (!live && isFinite(video.duration)) ? Math.floor(video.duration) : null,
+                stream: s ? {
+                    engine: s.engine,
+                    via: s.via,
+                    video: (video.videoWidth && video.videoHeight)
+                        ? { w: video.videoWidth, h: video.videoHeight, codec: s.videoCodec || null }
+                        : (s.videoCodec ? { codec: s.videoCodec } : null),
+                    audioOnly: !!s.audioOnly,
+                } : null,
+            }, extra || {});
+        }
+
+        // Session [s] is now in [state]; tells the apps (the current
+        // session only).
+        function setState(s, state, extra) {
+            if (!s || session !== s) return;
+            s.state = state;
+            s.lastExtra = extra || null;
+            sendToApps(statusOf(s, extra));
+        }
+
+        context.addCustomMessageListener(NIPA_NS, (event) => {
+            const data = event && event.data;
+            if (!data || data.type !== 'hello') return;
+            dbg('nipa', `hello from ${data.app || '?'} ${data.version || '?'} (${data.platform || '?'})`);
+            if (data.locale) LANG = pickLang(data.locale);
+            sendToApps({ type: 'hello', v: 1, rx: RX_VERSION, caps: probeCaps() }, event.senderId);
+            // An app that (re)joins mid-channel learns where things stand.
+            if (session) sendToApps(statusOf(session, session.lastExtra), event.senderId);
+        });
+
         function cleanup() {
             endSession();
             hideNotice();
@@ -653,6 +758,12 @@
                 hasPlayed: false,      // this session ever showed a picture
                 attemptPlayed: false,  // the current hls.js attempt did
                 emptyFrags: 0,         // fragments buffered with nothing playable
+                loadId: nipaLoadId,    // the app's id for this LOAD (status channel)
+                state: 'starting',     // what the status channel reports
+                lastExtra: null,       // its wait / failure, for heartbeats
+                via: null,             // 'm3u8' | 'ts-sibling' | 'ts-native' | 'native'
+                videoCodec: null,      // e.g. avc1.640028, from the manifest
+                audioOnly: false,
                 failed: false,
                 userPaused: false,
                 lastProgressAt: Date.now(),
@@ -720,7 +831,9 @@
 
         // Terminal: error screen, and LOAD_FAILED if CAF still waits (the
         // sender then reports the failure instead of "casting").
-        function failSession(s, { kind, codeLine, detail, status } = {}) {
+        // [reason] is what the status channel reports when the screen's
+        // [kind] doesn't say it (frozen, never started, network…).
+        function failSession(s, { kind, codeLine, detail, status, reason } = {}) {
             if (session !== s || s.failed) return;
             s.failed = true;
             s.timers.forEach(clearTimeout);
@@ -728,6 +841,10 @@
             dropHls();
             dbg('fail', `${kind || 'generic'} · ${codeLine || '-'}`, 'err');
             showError({ kind, codeLine, detail, status });
+            const failure = { kind: reason || kind || 'network' };
+            if (status) failure.http = status;
+            if (kind === 'codec' && s.codecMime) failure.detail = s.codecMime;
+            setState(s, 'failed', { failure });
             settleLoadForFailure(s);
         }
 
@@ -739,8 +856,10 @@
         // that times out after that disconnect leaves them "casting" with no
         // session). For them the LOAD succeeds and the screen explains; the
         // session stays up, so picking another channel just works.
+        // Apps on the status channel (`features.nipaStatus`) learn the
+        // failure there; their LOAD was resolved at once.
         function settleLoadForFailure(s) {
-            if (feature('loadFailure')) settleFail(s);
+            if (feature('loadFailure') && !feature('nipaStatus')) settleFail(s);
             else settleOk(s);
         }
 
@@ -817,6 +936,8 @@
 
                 cleanup();
                 hideError();
+                // The sender's language before anything is drawn.
+                readSenderHandshake(request);
                 showLoading(t('loading'));
                 // Reset the debug log so it shows only the current attempt.
                 dbgRows.length = 0;
@@ -829,7 +950,6 @@
 
                 const sum = urlSummary(url);
                 dbg('LOAD', `${sum.host} ${sum.ext} ct=${contentType || '-'} t=${startTime}s${isLive ? ' live' : ''}`);
-                readSenderHandshake(request);
                 lastKnownTime = 0;
                 armStartTimeGuard(startTime);
 
@@ -847,7 +967,7 @@
                         // a failed LOAD get one. An HLS request resolved with
                         // skipPlayersLoad leaves the element (and the error
                         // screen) alone.
-                        return feature('loadFailure') ? loadFailedError() : request;
+                        return (feature('loadFailure') && !feature('nipaStatus')) ? loadFailedError() : request;
                     }
                     if (Hls.isSupported()) {
                         return loadWithHlsJs(request, { url, contentType, startTime, isLive, liveTs });
@@ -858,7 +978,10 @@
                 } else {
                     dbg('engine', `native (${sum.ext})`, 'ok');
                 }
-                newSession({ url, contentType, startTime, isLive }).engine = 'native';
+                const ns = newSession({ url, contentType, startTime, isLive });
+                ns.engine = 'native';
+                ns.via = 'native';
+                setState(ns, 'starting');
                 return loadWithCafNative(request);
             }
         );
@@ -894,6 +1017,11 @@
                     codeLine: `MEDIA_ERROR · ${kind}`,
                     kind: isCodecError ? 'codec' : undefined,
                 });
+                const s = session;
+                if (s && !s.failed) {
+                    s.failed = true;
+                    setState(s, 'failed', { failure: { kind: isCodecError ? 'codec' : 'media' } });
+                }
             };
             video.addEventListener('loadedmetadata', onMeta, { once: true });
             video.addEventListener('error', onError);
@@ -928,10 +1056,13 @@
                     if (media.contentUrl) media.contentUrl = s.hlsUrl;
                     if (media.contentId) media.contentId = s.hlsUrl;
                     media.contentType = 'application/x-mpegurl';
+                    s.via = 'ts-sibling';
                     dbg('engine', 'live .ts → hls.js with its .m3u8', 'ok');
                 } else {
+                    s.via = 'm3u8';
                     dbg('engine', 'hls.js', 'ok');
                 }
+                setState(s, 'starting');
                 // Safety net: CAF must not wait forever for the first frame.
                 // Resolving keeps the session — and a provider wait — going;
                 // the screen says what is happening.
@@ -941,6 +1072,9 @@
                     settleOk(s);
                 });
                 startHls(s);
+                // Apps on the status channel follow the channel there: the
+                // LOAD only has to create the media session.
+                if (feature('nipaStatus')) settleOk(s);
             });
         }
 
@@ -994,7 +1128,10 @@
                     s.slotWaitStartedAt = 0;
                     s.slotRetries = 0;
                 }
+                const lv = levels.find((l) => l && l.videoCodec);
+                if (lv) s.videoCodec = lv.videoCodec;
                 showLoading(t('buffering'));
+                setState(s, 'buffering');
                 // Legacy path only — under resumeV2 hls.js starts at
                 // `startPosition` and the guard verifies it.
                 if (startTime > 0 && !feature('resumeV2')) video.currentTime = startTime;
@@ -1011,10 +1148,15 @@
             // not an error).
             h.on(Hls.Events.BUFFER_CODECS, (e, tracks) => {
                 if (session !== s || hls !== h) return;
-                const hasVideo = !!(tracks && (tracks.video || tracks.audiovideo));
+                const vt = tracks && (tracks.video || tracks.audiovideo);
+                // Playlists often don't declare codecs; the demuxer knows.
+                if (vt && vt.codec && !s.videoCodec) s.videoCodec = vt.codec;
+                const hasVideo = !!vt;
                 if (!hasVideo && tracks && tracks.audio) {
                     dbg('codec', 'no video track this device can read — sound only', 'warn');
                     showNotice(t('audioOnly'));
+                    s.audioOnly = true;
+                    setState(s, s.state, s.lastExtra);
                 }
             });
 
@@ -1108,7 +1250,7 @@
                 }
                 // No status (network, CORS) or a timeout: often transient.
                 if (rebuild(s, summary)) return;
-                failSession(s, { codeLine: errorLine(data, status) });
+                failSession(s, { codeLine: errorLine(data, status), reason: 'network' });
                 return;
             }
 
@@ -1128,7 +1270,18 @@
             // Media errors: recoverMediaError() left the element paused with
             // loading stopped (a silent freeze); rebuild from scratch instead.
             if (rebuild(s, summary)) return;
-            failSession(s, { codeLine: errorLine(data, status) });
+            failSession(s, { kind: 'stalled', codeLine: errorLine(data, status), reason: 'media' });
+        }
+
+        // The provider wait as the status channel reports it.
+        function slotWait(s) {
+            const since = Date.now() - s.slotWaitStartedAt;
+            return {
+                http: s.slotStatus,
+                sinceMs: since,
+                attempts: s.slotRetries,
+                giveUpInMs: Math.max(0, SLOT_WAIT_MS - since),
+            };
         }
 
         function waitForSlot(s, status, summary) {
@@ -1147,6 +1300,8 @@
                 return;
             }
             showLoading(t('waitingProviderTitle'), t('waitingProviderDetail'));
+            s.slotStatus = status;
+            setState(s, 'waitingSlot', { wait: slotWait(s) });
             const delay = SLOT_RETRY_DELAYS_MS[Math.min(s.slotRetries, SLOT_RETRY_DELAYS_MS.length - 1)];
             s.slotRetries += 1;
             later(s, delay, () => {
@@ -1171,6 +1326,7 @@
                 // Resume from where it was, not the LOAD's start time.
                 disarmStartTimeGuard();
                 showLoading(t('reconnecting'));
+                setState(s, 'reconnecting');
             }
             dropHls();
             s.networkRecovered = false;
@@ -1187,6 +1343,7 @@
             dropHls();
             s.hlsUrl = null;
             s.engine = 'native';
+            s.via = 'ts-native';
             const onError = () => {
                 video.removeEventListener('error', onError);
                 if (session !== s) return;
@@ -1214,6 +1371,15 @@
             s.attemptPlayed = true;
             s.lastProgressAt = Date.now();
             settleOk(s);
+            if (!s.failed && !(s.userPaused && video.paused)) setState(s, 'playing');
+        });
+        video.addEventListener('waiting', () => {
+            const s = session;
+            if (s && !s.failed && s.state === 'playing') setState(s, 'buffering');
+        });
+        video.addEventListener('ended', () => {
+            const s = session;
+            if (s && !s.failed) setState(s, 'ended');
         });
 
         // ━━━━━━ Watchdog (hls engine) ━━━━━━
@@ -1227,6 +1393,8 @@
         // A provider wait, a user pause and a user seek are left alone.
         setInterval(() => {
             const s = session;
+            // Heartbeat: the app knows the TV is alive and where it is.
+            if (s) sendToApps(statusOf(s, s.state === 'waitingSlot' ? { wait: slotWait(s) } : s.lastExtra));
             if (!s || s.failed || s.engine !== 'hls' || s.slotWaitStartedAt || !hls) return;
             const now = Date.now();
             if (video.currentTime > s.lastProgressPos + 0.2 || video.currentTime < s.lastProgressPos - 1) {
@@ -1243,7 +1411,7 @@
             if (!s.attemptPlayed) {
                 if (now - s.attemptStartedAt > NO_START_AFTER_MS &&
                     !rebuild(s, `no picture after ${NO_START_AFTER_MS / 1000}s`)) {
-                    failSession(s, { codeLine: 'NO PLAYBACK' });
+                    failSession(s, { kind: 'stalled', codeLine: 'NO PLAYBACK', reason: 'noPlayback' });
                 }
                 return;
             }
@@ -1254,7 +1422,7 @@
             if (now - s.lastProgressAt > FROZEN_AFTER_MS) {
                 s.lastProgressAt = now;
                 if (!rebuild(s, `frozen for ${FROZEN_AFTER_MS / 1000}s`)) {
-                    failSession(s, { codeLine: 'PLAYBACK FROZEN' });
+                    failSession(s, { kind: 'stalled', codeLine: 'PLAYBACK FROZEN', reason: 'frozen' });
                 }
             }
         }, 5000);
@@ -1269,7 +1437,12 @@
         // session has transitioned out of LOADING.
         const changePlaybackStatus = (shouldPlay) => (message) => {
             // The watchdog leaves a pause the user asked for alone.
-            if (session) session.userPaused = !shouldPlay;
+            if (session) {
+                session.userPaused = !shouldPlay;
+                if (!session.failed) {
+                    setState(session, shouldPlay ? (session.hasPlayed ? 'playing' : 'buffering') : 'paused');
+                }
+            }
             if (shouldPlay) {
                 video.play().catch((e) => dbg('cmd', `play() rejected: ${e.message || e}`, 'warn'));
                 dbg('cmd', 'PLAY');
@@ -1422,12 +1595,15 @@
             // A fresh session: a provider wait starts over, and nothing is
             // pending in CAF (it considers the load done).
             const s = newSession({ url, contentType, startTime, isLive });
+            setState(s, 'starting');
             if ((isHls || liveTs) && window.Hls && Hls.isSupported()) {
                 s.engine = 'hls';
+                s.via = liveTs ? 'ts-sibling' : 'm3u8';
                 if (liveTs) s.hlsUrl = tsToM3u8(url);
                 startHls(s);
             } else {
                 s.engine = 'native';
+                s.via = 'native';
                 // For native, set the src directly — CAF isn't in the loop
                 // for retries so there's no risk of a duplicate load here.
                 video.src = url;
@@ -1453,6 +1629,9 @@
         // supportedCommands mask and the sender greys out the controls.
         options.supportedCommands = cast.framework.messages.Command.ALL_BASIC_MEDIA;
         options.mediaElement = video;
+        // The status channel (see "NiPa status channel"). Namespaces must be
+        // declared before start.
+        options.customNamespaces = { [NIPA_NS]: cast.framework.system.MessageType.JSON };
         context.start(options);
         dbg('ready', 'receiver started', 'ok');
         if (!DEBUG_ALWAYS_VISIBLE) hideDebugSoon();
