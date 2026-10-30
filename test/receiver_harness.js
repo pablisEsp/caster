@@ -622,32 +622,41 @@ test("the app's language: every one of them, right to left where it's written so
   assert.strictEqual(env.els['ready-title'].textContent, 'Ready to cast', 'a fade that never ends still swaps');
 });
 
-test('the ready words: never in the wrong language first; the next launch starts in the app\'s', async () => {
+test('the ready words: only ever shown in the app\'s language, whatever the TV kept', async () => {
   const STR = (lang) => setup().ev('STRINGS')[lang];
   const words = (env) => env.els['ready-text'].classList.contains('pending') ? null : env.els['ready-title'].textContent;
   // First launch on this TV (an English one): nothing kept, the words wait.
   const kept = {};
   const first = setup({ storage: kept, lang: 'en-GB' });
   assert.strictEqual(words(first), null, 'hidden until the app says');
-  first.clock.advance(1000);
+  first.clock.advance(300);
   first.fromApp({ type: 'hello', v: 1, app: 'nipa', version: '1.5.1', platform: 'ios', locale: 'es-ES' });
   assert.strictEqual(words(first), STR('es').readyTitle, 'straight in Spanish');
   assert.strictEqual(kept['nipa.lang'], 'es');
-  // Next launch: Spanish from the first frame.
+  // Next launch, the app now in Arabic: the kept Spanish is never shown.
   const next = setup({ storage: kept, lang: 'en-GB' });
-  assert.strictEqual(words(next), STR('es').readyTitle);
-  assert.strictEqual(next.ctx.document.documentElement.lang, 'es');
-  // Another phone in German: the words fade out, swap, and come back.
+  assert.strictEqual(words(next), null, 'waits for the app even with a language kept');
+  next.clock.advance(300);
+  next.fromApp({ type: 'hello', v: 1, app: 'nipa', version: '1.5.1', platform: 'ios', locale: 'ar' });
+  assert.strictEqual(words(next), STR('ar').readyTitle, 'straight in Arabic');
+  assert.strictEqual(kept['nipa.lang'], 'ar');
+  // Another phone in German joins later: the words fade out, swap, and come back.
   next.fromApp({ type: 'hello', v: 1, app: 'nipa', version: '1.5.1', platform: 'android', locale: 'de-DE' });
   assert.strictEqual(words(next), null, 'fading out');
   next.clock.advance(500);
-  assert.strictEqual(next.els['ready-title'].textContent, STR('es').readyTitle, 'not swapped before the fade ends');
+  assert.strictEqual(next.els['ready-title'].textContent, STR('ar').readyTitle, 'not swapped before the fade ends');
   next.els['ready-text'].fire('transitionend');
   assert.strictEqual(words(next), STR('de').readyTitle);
   assert.strictEqual(kept['nipa.lang'], 'de');
-  // An app that never says (an old version): the device's language, after a moment.
+  // An app that doesn't say in time: the kept language, after a moment...
+  const late = setup({ storage: { 'nipa.lang': 'pl' }, lang: 'en-GB' });
+  late.clock.advance(1900);
+  assert.strictEqual(words(late), null);
+  late.clock.advance(200);
+  assert.strictEqual(words(late), STR('pl').readyTitle);
+  // ...or with none kept (an old version, never), the device's.
   const silent = setup({ storage: {}, lang: 'fr-FR' });
-  silent.clock.advance(2400);
+  silent.clock.advance(1900);
   assert.strictEqual(words(silent), null);
   silent.clock.advance(200);
   assert.strictEqual(words(silent), STR('fr').readyTitle);

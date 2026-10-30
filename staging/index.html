@@ -304,12 +304,14 @@
         // and in every LOAD. A Chromecast doesn't pass the launching phone's
         // language to the page: navigator.language is the device's own, even
         // when the launch asks for another (checked on a 2nd-gen Chromecast).
-        // So until the app speaks, the TV goes by the last language an app
-        // gave, kept on the device. With none kept (the first time), the
-        // "Ready to cast" words stay hidden for a moment while the app says
-        // its language, then appear in the device's.
+        // So the "Ready to cast" words stay hidden until the app says its
+        // language (its hello comes about 0.3 s after the page starts). Only
+        // an app that doesn't say in time gets a fallback: the last language
+        // an app gave (kept on the device), else the device's own. Showing
+        // the kept language at once was wrong whenever the app's language
+        // had changed since, and the words switched in front of the user.
         const LANG_KEY = 'nipa.lang';
-        const READY_TEXT_WAIT_MS = 2500;
+        const READY_TEXT_WAIT_MS = 2000;
         function recallLang() {
             try { return localStorage.getItem(LANG_KEY); } catch (_) { return null; }
         }
@@ -1687,10 +1689,8 @@
         options.customNamespaces = { [NIPA_NS]: cast.framework.system.MessageType.JSON };
         context.start(options);
         dbg('ready', 'receiver started', 'ok');
-        // The "Ready to cast" words: now in a language an app gave before,
-        // else after a moment for this app to give its own.
-        if (recalledLang) showReadyText('kept');
-        else readyTextTimer = setTimeout(() => showReadyText('device'), READY_TEXT_WAIT_MS);
+        // The "Ready to cast" words wait for the app to say its language.
+        readyTextTimer = setTimeout(() => showReadyText(recalledLang ? 'kept' : 'device'), READY_TEXT_WAIT_MS);
         if (!DEBUG_ALWAYS_VISIBLE) hideDebugSoon();
     </script>
 </body>
