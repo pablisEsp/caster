@@ -81,6 +81,13 @@
             line-height: 1.5; text-align: center;
             max-width: 640px; padding: 0 32px;
         }
+        /* The words stay hidden until the TV knows the app's language (see
+           "Language"), and fade out and back in when it changes under them. */
+        #ready-text {
+            display: flex; flex-direction: column; align-items: center;
+            transition: opacity 0.25s ease;
+        }
+        #ready-text.pending { opacity: 0; }
 
         /* ━━━━━━ Error overlay ━━━━━━ */
         #error-icon {
@@ -177,8 +184,12 @@
         <div id="ready-icon">
             <svg viewBox="0 0 24 24"><path d="M21 3H3c-1.1 0-2 .9-2 2v3h2V5h18v14h-7v2h7c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM1 18v3h3c0-1.66-1.34-3-3-3zm0-4v2c2.76 0 5 2.24 5 5h2c0-3.87-3.13-7-7-7zm0-4v2c4.97 0 9 4.03 9 9h2c0-6.08-4.93-11-11-11z"/></svg>
         </div>
-        <div id="ready-title">Ready to cast</div>
-        <div id="ready-subtitle">Pick a channel or video on your phone to start streaming.</div>
+        <!-- Hidden until the TV knows which language to say it in; the
+             English here only holds the space. -->
+        <div id="ready-text" class="pending">
+            <div id="ready-title">Ready to cast</div>
+            <div id="ready-subtitle">Pick a channel or video on your phone to start streaming.</div>
+        </div>
     </div>
     <div id="loading" class="overlay hidden">
         <div class="spinner"></div>
@@ -287,23 +298,75 @@
         const errorCode = document.getElementById('error-code');
         const errorRetry = document.getElementById('error-retry');
 
-        // Localize the initial "Ready to cast" overlay copy. The HTML
-        // strings are placeholders for the default English render before
-        // JS runs; once we boot we replace them so the receiver respects
-        // STRINGS / LANG (future i18n).
+        // ━━━━━━ Language ━━━━━━
+        //
+        // The TV speaks the app's language, which the app gives in its hello
+        // and in every LOAD. A Chromecast doesn't pass the launching phone's
+        // language to the page: navigator.language is the device's own, even
+        // when the launch asks for another (checked on a 2nd-gen Chromecast).
+        // So until the app speaks, the TV goes by the last language an app
+        // gave, kept on the device. With none kept (the first time), the
+        // "Ready to cast" words stay hidden for a moment while the app says
+        // its language, then appear in the device's.
+        const LANG_KEY = 'nipa.lang';
+        const READY_TEXT_WAIT_MS = 2500;
+        function recallLang() {
+            try { return localStorage.getItem(LANG_KEY); } catch (_) { return null; }
+        }
+        function rememberLang(code) {
+            // Storage off or full: the next launch waits for the app instead.
+            try { localStorage.setItem(LANG_KEY, code); } catch (_) { /* */ }
+        }
+        const readyTextEl = document.getElementById('ready-text');
+        let readyTextTimer = null;
+        let readySwap = null;
+        function fillReadyText() {
+            readyTitleEl.textContent = t('readyTitle');
+            readySubtitleEl.textContent = t('readySubtitle');
+        }
         // The page's language and direction, and the copy already on screen
         // that doesn't change on its own (the "Ready to cast" screen).
-        function applyLang(locale) {
+        // [fromApp]: the app gave it, so it's kept and the words show now.
+        function applyLang(locale, fromApp) {
+            const before = LANG;
             LANG = pickLang(locale);
             const root = document.documentElement;
             if (root) {
                 root.lang = LANG;
                 root.dir = RTL.includes(LANG) ? 'rtl' : 'ltr';
             }
-            readyTitleEl.textContent = t('readyTitle');
-            readySubtitleEl.textContent = t('readySubtitle');
+            if (fromApp) rememberLang(LANG);
+            if (readySwap) {
+                // A swap under way shows whatever is current when it lands.
+            } else if (readyTextEl.classList.contains('pending')) {
+                fillReadyText();
+            } else if (LANG !== before) {
+                // Words already on screen: fade out, swap, fade back in. The
+                // swap waits for the fade to end (a Chromecast can start it
+                // late; a fixed delay swapped the words half-faded), with a
+                // backstop for a fade that never runs.
+                readyTextEl.classList.add('pending');
+                const swap = () => {
+                    if (!readySwap) return;
+                    clearTimeout(readySwap);
+                    readySwap = null;
+                    readyTextEl.removeEventListener('transitionend', swap);
+                    fillReadyText();
+                    readyTextEl.classList.remove('pending');
+                };
+                readyTextEl.addEventListener('transitionend', swap);
+                readySwap = setTimeout(swap, 1000);
+            }
+            if (fromApp) showReadyText('app');
         }
-        applyLang(navigator.language);
+        function showReadyText(why) {
+            if (readyTextTimer) { clearTimeout(readyTextTimer); readyTextTimer = null; }
+            if (readySwap || !readyTextEl.classList.contains('pending')) return;
+            readyTextEl.classList.remove('pending');
+            dbg('lang', `${LANG} (${why})`);
+        }
+        const recalledLang = recallLang();
+        applyLang(recalledLang || navigator.language);
 
         let hls = null;
 
@@ -352,10 +415,11 @@
                 ? custom.features : {};
             // Senders from 1.5.1 send their UI locale; for older ones it's the
             // device's language (per LOAD, so it never sticks from a
-            // previous sender).
+            // previous sender, and isn't kept for the next launch).
             const nipa = (custom.nipa && typeof custom.nipa === 'object') ? custom.nipa : {};
             nipaLoadId = typeof nipa.loadId === 'string' ? nipa.loadId : null;
-            applyLang(nipa.locale || custom.locale || navigator.language);
+            const appLocale = nipa.locale || custom.locale;
+            applyLang(appLocale || navigator.language, !!appLocale);
             const on = Object.keys(activeFeatures).filter(feature).join(',') || '-';
             dbg('sender', senderInfo
                 ? `${senderInfo.app} ${senderInfo.version} (${senderInfo.platform}) features=${on}`
@@ -666,7 +730,7 @@
             const data = event && event.data;
             if (!data || data.type !== 'hello') return;
             dbg('nipa', `hello from ${data.app || '?'} ${data.version || '?'} (${data.platform || '?'})`);
-            if (data.locale) applyLang(data.locale);
+            if (data.locale) applyLang(data.locale, true);
             sendToApps({ type: 'hello', v: 1, rx: RX_VERSION, caps: probeCaps() }, event.senderId);
             // An app that (re)joins mid-channel learns where things stand.
             if (session) sendToApps(statusOf(session, session.lastExtra), event.senderId);
@@ -1623,6 +1687,10 @@
         options.customNamespaces = { [NIPA_NS]: cast.framework.system.MessageType.JSON };
         context.start(options);
         dbg('ready', 'receiver started', 'ok');
+        // The "Ready to cast" words: now in a language an app gave before,
+        // else after a moment for this app to give its own.
+        if (recalledLang) showReadyText('kept');
+        else readyTextTimer = setTimeout(() => showReadyText('device'), READY_TEXT_WAIT_MS);
         if (!DEBUG_ALWAYS_VISIBLE) hideDebugSoon();
     </script>
 </body>

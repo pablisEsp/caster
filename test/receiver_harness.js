@@ -29,7 +29,9 @@ function makeEl(id) {
   };
 }
 
-function setup() {
+// storage: what the TV kept from earlier launches (localStorage); null for a
+// TV whose storage throws. lang: the device's own language.
+function setup({ storage = {}, lang = LANG } = {}) {
   // ── manual clock ──
   let now = 1_000_000;
   let seq = 0;
@@ -130,12 +132,23 @@ function setup() {
     console, URL, URLSearchParams, Promise, Date: { now: () => clock.now() },
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, setInterval: clock.setInterval,
     document: { getElementById: getEl, documentElement: { lang: 'en', dir: 'ltr' } },
-    navigator: { language: LANG },
+    navigator: { language: lang },
     location: { search: '', pathname: '/caster/staging/' },
     addEventListener() {},
     cast, Hls,
     MediaSource: { isTypeSupported: (t) => device.mse.has(t) },
   };
+  Object.defineProperty(ctx, 'localStorage', {
+    get() {
+      if (storage === null) throw new Error('SecurityError: storage is off');
+      return {
+        getItem: (k) => (Object.prototype.hasOwnProperty.call(storage, k) ? storage[k] : null),
+        setItem: (k, v) => { storage[k] = String(v); },
+      };
+    },
+  });
+  // As in the page's markup: the ready words start hidden.
+  getEl('ready-text').classList.add('pending');
   ctx.window = ctx;
   vm.createContext(ctx);
   if (STRINGS_SRC) vm.runInContext(STRINGS_SRC, ctx);
@@ -605,7 +618,51 @@ test("the app's language: every one of them, right to left where it's written so
   assert.strictEqual(root.lang, 'pt');
   env.fromApp({ type: 'hello', v: 1, app: 'nipa', version: '1.5.1', platform: 'ios', locale: 'xx' });
   assert.strictEqual(root.lang, 'en');
-  assert.strictEqual(env.els['ready-title'].textContent, 'Ready to cast');
+  env.clock.advance(1000);
+  assert.strictEqual(env.els['ready-title'].textContent, 'Ready to cast', 'a fade that never ends still swaps');
+});
+
+test('the ready words: never in the wrong language first; the next launch starts in the app\'s', async () => {
+  const STR = (lang) => setup().ev('STRINGS')[lang];
+  const words = (env) => env.els['ready-text'].classList.contains('pending') ? null : env.els['ready-title'].textContent;
+  // First launch on this TV (an English one): nothing kept, the words wait.
+  const kept = {};
+  const first = setup({ storage: kept, lang: 'en-GB' });
+  assert.strictEqual(words(first), null, 'hidden until the app says');
+  first.clock.advance(1000);
+  first.fromApp({ type: 'hello', v: 1, app: 'nipa', version: '1.5.1', platform: 'ios', locale: 'es-ES' });
+  assert.strictEqual(words(first), STR('es').readyTitle, 'straight in Spanish');
+  assert.strictEqual(kept['nipa.lang'], 'es');
+  // Next launch: Spanish from the first frame.
+  const next = setup({ storage: kept, lang: 'en-GB' });
+  assert.strictEqual(words(next), STR('es').readyTitle);
+  assert.strictEqual(next.ctx.document.documentElement.lang, 'es');
+  // Another phone in German: the words fade out, swap, and come back.
+  next.fromApp({ type: 'hello', v: 1, app: 'nipa', version: '1.5.1', platform: 'android', locale: 'de-DE' });
+  assert.strictEqual(words(next), null, 'fading out');
+  next.clock.advance(500);
+  assert.strictEqual(next.els['ready-title'].textContent, STR('es').readyTitle, 'not swapped before the fade ends');
+  next.els['ready-text'].fire('transitionend');
+  assert.strictEqual(words(next), STR('de').readyTitle);
+  assert.strictEqual(kept['nipa.lang'], 'de');
+  // An app that never says (an old version): the device's language, after a moment.
+  const silent = setup({ storage: {}, lang: 'fr-FR' });
+  silent.clock.advance(2400);
+  assert.strictEqual(words(silent), null);
+  silent.clock.advance(200);
+  assert.strictEqual(words(silent), STR('fr').readyTitle);
+  // Its LOAD without a locale isn't kept; one with a locale is.
+  const s2 = {};
+  const legacy = setup({ storage: s2 });
+  legacy.interceptors.LOAD(loadReq('http://p.example/live/u/p/1.m3u8'));
+  assert.strictEqual(s2['nipa.lang'], undefined);
+  legacy.interceptors.LOAD(nipaReq('http://p.example/live/u/p/1.m3u8', 'K'));
+  assert.strictEqual(s2['nipa.lang'], 'en');
+  // Storage off: still works, just waits for the app every time.
+  const off = setup({ storage: null, lang: 'en-GB' });
+  assert.strictEqual(words(off), null);
+  off.fromApp({ type: 'hello', v: 1, app: 'nipa', version: '1.5.1', platform: 'ios', locale: 'it' });
+  assert.strictEqual(words(off), STR('it').readyTitle);
 });
 
 test('status: an app that joins mid-channel gets the current state; a new LOAD has its own id', async () => {
