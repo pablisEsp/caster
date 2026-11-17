@@ -1227,6 +1227,15 @@
                 s.slotRetries = 0;
             }
             if (['starting', 'waitingSlot', 'reconnecting'].includes(s.state)) setState(s, 'buffering');
+            // No picture size in the metadata: this device can't decode the
+            // video (HEVC, Xvid…), or the file has none. Stopped before a
+            // sound is heard: sound over black, then an error, looked like
+            // the app failing (Pablo, 17-nov). The 3 s check stays for files
+            // that give a size and still show nothing.
+            if (canReload() && !s.audioContent && !video.videoWidth && !video.videoHeight) {
+                dbg('native', 'no picture size in the metadata', 'warn');
+                classifyNative(s, 'audioOnly');
+            }
         });
 
         video.addEventListener('error', () => {
@@ -1311,7 +1320,7 @@
                     reloadNative(s, at);
                     return;
                 }
-                const problem = m ? formatProblem(m, { soundPlayed: why === 'audioOnly' }) : null;
+                const problem = m ? formatProblem(m, { soundPlayed: why === 'audioOnly' && s.hasPlayed }) : null;
                 if (problem || why === 'audioOnly') {
                     // No picture with nothing named is still about the picture.
                     const p = problem || (m && m.video ? { part: 'video', name: videoName(m.video), codec: m.video.codec } : null);

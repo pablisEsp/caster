@@ -852,19 +852,42 @@ test('movie with AAC 5.1: fails after the metadata, names the sound, and the TV 
   assert(!/secret|p\.example|http/i.test(JSON.stringify(env.sent)), 'no URL leaves the TV');
 });
 
-test('HEVC 10-bit: sound over black is stopped after 3 s and the picture is named', async () => {
+test('an older app: sound over black is said over the sound after 3 s, never stopped', async () => {
   const env = setup();
   env.provider.answer = () => ({ status: 200, body: fixture('hevc10.mkv') });
-  loadVod(env, vodReq('http://p.example/movie/u/p/3.mkv', 'M3'));
+  loadVod(env, vodReq('http://p.example/movie/u/p/3.mkv', 'M3', { features: { resumeV2: true, seekV2: true } }));
+  env.video.fire('loadedmetadata');
+  assert(env.video.src, 'not stopped at the metadata for an app that can\'t follow a reload');
+  playFor(env, 1);
+  env.clock.advance(3000); await flush();
+  assert(!env.els.notice.classList.contains('hidden'), 'the sound-only notice');
+  assert.strictEqual(env.provider.fetches.length, 0, 'nothing read: it keeps playing');
+});
+
+test('no picture size in the metadata: stopped before any sound, then named', async () => {
+  const env = setup();
+  env.provider.answer = () => ({ status: 200, body: fixture('hevc10.mkv') });
+  loadVod(env, vodReq('http://p.example/movie/u/p/13.mkv', 'M13'));
+  env.video.fire('loadedmetadata');
+  assert.strictEqual(env.video.src, '', 'stopped at the metadata, before playing');
+  await flush();
+  assert.deepStrictEqual(last(env).failure.format, { part: 'video', name: 'HEVC (H.265), 10-bit' });
+  assert(!env.statuses().some((x) => x.state === 'playing'), 'never played');
+  assert.strictEqual(overlay(env).errorTitle, "This TV can't play this video");
+});
+
+test('no picture size, sound-only file: reloaded once and left playing', async () => {
+  const env = setup();
+  env.provider.answer = () => ({ status: 200, body: fixture('audio_only.mkv') });
+  loadVod(env, vodReq('http://p.example/music/u/p/14.mkv', 'M14'));
+  env.video.fire('loadedmetadata');
+  await flush();
+  assert.strictEqual(env.loads.length, 1, 'reloaded');
   env.video.fire('loadedmetadata');
   playFor(env, 1);
-  env.clock.advance(2999); await flush();
-  assert.strictEqual(env.provider.fetches.length, 0, 'not before 3 s');
-  env.clock.advance(1); await flush();
-  assert.strictEqual(env.video.src, '', 'stopped first: the read needs the connection');
-  const st = last(env);
-  assert.deepStrictEqual(st.failure, { kind: 'codec', format: { part: 'video', name: 'HEVC (H.265), 10-bit' } });
-  assert(overlay(env).errorSubtitle.startsWith('Its picture is in HEVC (H.265), 10-bit, which'));
+  env.clock.advance(5000); await flush();
+  assert.strictEqual(env.loads.length, 1, 'not again');
+  assert(!overlay(env).error);
 });
 
 test('Xvid AVI (served as .mp4): named MPEG-4 Part 2', async () => {
@@ -872,36 +895,19 @@ test('Xvid AVI (served as .mp4): named MPEG-4 Part 2', async () => {
   env.provider.answer = () => ({ status: 200, body: fixture('xvid.avi') });
   loadVod(env, vodReq('http://p.example/movie/u/p/4.mp4', 'M4', { contentType: 'video/mp4' }));
   env.video.fire('loadedmetadata');
-  playFor(env, 1);
-  env.clock.advance(3000); await flush();
+  await flush();
   assert.deepStrictEqual(last(env).failure.format, { part: 'video', name: 'MPEG-4 Part 2 (Xvid/DivX)' });
 });
 
 test('a picture: nothing is checked, nothing is read', async () => {
   const env = setup();
   loadVod(env, vodReq('http://p.example/movie/u/p/5.mkv', 'M5'));
-  env.video.fire('loadedmetadata');
   env.video.videoWidth = 1280; env.video.videoHeight = 720; env.video.webkitDecodedFrameCount = 30;
+  env.video.fire('loadedmetadata');
   playFor(env, 1);
   env.clock.advance(10000); await flush();
   assert.strictEqual(env.provider.fetches.length, 0);
   assert.strictEqual(last(env).state, 'playing');
-});
-
-test('sound only on purpose (no video track in the file): carries on where it was', async () => {
-  const env = setup();
-  env.provider.answer = () => ({ status: 200, body: fixture('audio_only.mkv') });
-  loadVod(env, vodReq('http://p.example/movie/u/p/6.mkv', 'M6'));
-  env.video.fire('loadedmetadata');
-  playFor(env, 2);
-  env.video.fire('timeupdate');
-  env.clock.advance(3000); await flush();
-  assert.strictEqual(env.loads.length, 1, 'reloaded');
-  assert.strictEqual(env.loads[0].currentTime, 2, 'where it was');
-  assert(!overlay(env).error);
-  playFor(env, 1);
-  env.clock.advance(10000); await flush();
-  assert.strictEqual(env.provider.fetches.length, 1, 'not checked again');
 });
 
 test('the provider sends a page (HTTP 200, HTML): "a page instead of the video"', async () => {
@@ -969,8 +975,8 @@ test('slow to open: says so after 12 s; then plays, or fails after 2 min', async
 test('broke after playing: reloads where it was', async () => {
   const env = setup();
   loadVod(env, vodReq('http://p.example/movie/u/p/12.mkv', 'M12'));
-  env.video.fire('loadedmetadata');
   env.video.videoWidth = 1280; env.video.webkitDecodedFrameCount = 10;
+  env.video.fire('loadedmetadata');
   playFor(env, 500);
   env.video.fire('timeupdate');
   mediaError(env, 2);
@@ -990,8 +996,8 @@ const ep = (n, extra = {}) => Object.assign({
 const queueStates = (env, to) => env.sent.filter((x) => x.msg.type === 'queue' && (!to || x.to === to)).map((x) => x.msg);
 function startEpisode(env, loadId = 'E1') {
   loadVod(env, vodReq(`http://p.example/series/u/secret/${loadId}.mkv`, loadId));
-  env.video.fire('loadedmetadata');
   env.video.videoWidth = 1280; env.video.webkitDecodedFrameCount = 10;
+  env.video.fire('loadedmetadata');
   env.video.duration = 2400;      // credits window: 6% = 144 s
   env.video.currentTime = 0;
   playFor(env, 1);
