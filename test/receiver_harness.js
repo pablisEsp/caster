@@ -998,7 +998,7 @@ function startEpisode(env, loadId = 'E1') {
   loadVod(env, vodReq(`http://p.example/series/u/secret/${loadId}.mkv`, loadId));
   env.video.videoWidth = 1280; env.video.webkitDecodedFrameCount = 10;
   env.video.fire('loadedmetadata');
-  env.video.duration = 2400;      // credits window: 6% = 144 s
+  env.video.duration = 2400;      // credits window: 3% = 72 s
   env.video.currentTime = 0;
   playFor(env, 1);
 }
@@ -1009,17 +1009,17 @@ test('queue: at the credits, an 8 s count, then the TV loads the next episode it
   startEpisode(env);
   env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', autoAdvance: true, items: [ep(2, { start: 30 }), ep(3)] });
   assert.deepStrictEqual(last(env).queue, { left: 2, auto: true, cancelled: false });
-  at(env, 2255);
-  assert(env.els.upnext.classList.contains('hidden'), 'not yet: 145 s left');
-  at(env, 2256);
+  at(env, 2327);
+  assert(env.els.upnext.classList.contains('hidden'), 'not yet: 73 s left');
+  at(env, 2328);
   assert(!env.els.upnext.classList.contains('hidden'), 'the card');
   assert.strictEqual(env.els['upnext-title'].textContent, 'S1 · E2 — Episode 2');
   assert.strictEqual(env.els['upnext-count'].textContent, 'Starts in 8 s');
   assert.deepStrictEqual(last(env).upNext, { loadId: 'E2', inSec: 8, total: 8 });
-  at(env, 2260);
+  at(env, 2332);
   assert.strictEqual(env.els['upnext-count'].textContent, 'Starts in 4 s');
   assert.strictEqual(env.loads.length, 0);
-  at(env, 2264);
+  at(env, 2336);
   assert.strictEqual(env.loads.length, 1, 'the next episode, by the TV');
   const r = env.loads[0];
   assert.strictEqual(r.customData.nipa.loadId, 'E2');
@@ -1037,7 +1037,7 @@ test('queue: at the credits, an 8 s count, then the TV loads the next episode it
   const qs = queueStates(env).at(-1);
   assert.strictEqual(qs.current, 'E2');
   assert.deepStrictEqual(qs.left, ['E3']);
-  assert.deepStrictEqual(qs.history, [{ loadId: 'E1', pos: 2264, dur: 2400, finished: true }]);
+  assert.deepStrictEqual(qs.history, [{ loadId: 'E1', pos: 2336, dur: 2400, finished: true }]);
   assert(!/secret|p\.example|img\.example|http/i.test(JSON.stringify(env.sent)), 'no URL leaves the TV');
 });
 
@@ -1045,17 +1045,38 @@ test('queue: pausing freezes the count; seeking back out of the credits hides th
   const env = setup();
   startEpisode(env);
   env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', items: [ep(2)] });
-  at(env, 2300);
-  at(env, 2303);
+  at(env, 2330);
+  at(env, 2333);
   assert.strictEqual(env.els['upnext-count'].textContent, 'Starts in 5 s');
   env.clock.advance(60000);
-  at(env, 2303);
+  at(env, 2333);
   assert.strictEqual(env.loads.length, 0, 'paused: no time passes for the count');
   at(env, 1000);
   assert(env.els.upnext.classList.contains('hidden'));
   assert.strictEqual(last(env).upNext, undefined);
-  at(env, 2300);
+  at(env, 2330);
   assert.strictEqual(env.els['upnext-count'].textContent, 'Starts in 8 s', 'a fresh count');
+});
+
+test("queue: the series' learned scale moves the card later, and goes on with the queue", async () => {
+  const env = setup();
+  startEpisode(env);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', creditsScale: 0.5, items: [ep(2), ep(3)] });
+  at(env, 2363);
+  assert(env.els.upnext.classList.contains('hidden'), 'half of 72 s: not before 36 s from the end');
+  at(env, 2364);
+  assert(!env.els.upnext.classList.contains('hidden'));
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', cmd: 'scale', creditsScale: 0.1 });
+  assert.strictEqual(env.ev('session.queue.creditsScale'), 0.3, 'never under 30%');
+  env.video.fire('ended');
+  await flush();
+  assert.strictEqual(env.ev('session.loadId'), 'E2');
+  assert.strictEqual(env.ev('session.queue.creditsScale'), 0.3, 'carried to the next episode');
+  env.video.duration = 600;        // 3% = 18 s → the 30 s minimum, × 0.3 = 9 → the 12 s floor
+  at(env, 587);
+  assert(env.els.upnext.classList.contains('hidden'));
+  at(env, 588);
+  assert(!env.els.upnext.classList.contains('hidden'));
 });
 
 test('queue: an episode that reaches its end goes on at once', async () => {
@@ -1074,7 +1095,7 @@ test('queue: cancel from the app lets the episode end, and nothing follows', asy
   const env = setup();
   startEpisode(env);
   env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', items: [ep(2)] });
-  at(env, 2300);
+  at(env, 2330);
   env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', cmd: 'cancel' });
   assert(env.els.upnext.classList.contains('hidden'));
   assert.strictEqual(last(env).queue.cancelled, true);

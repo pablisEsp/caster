@@ -1853,17 +1853,29 @@
         // ({type:'queue', forLoadId, items, autoAdvance}); the TV plays them
         // itself, so the chain no longer stops when the phone sleeps (iOS
         // suspends the app while it casts). As on the phone: around the
-        // credits (6% before the end, between 30 s and 3 min) a card counts
+        // credits (the last 3%, between 30 s and 2 min, times the series'
+        // learned `creditsScale` — the app's CreditsTiming) a card counts
         // down 8 s and the next episode starts, skipping the rest of the
         // credits; at the very end it starts at once. Pausing or seeking back
-        // stops the count. The app can say {cmd:'next'} or {cmd:'cancel'}
-        // (that episode then plays to its end, and the chain stops).
+        // stops the count. The app can say {cmd:'next'}, {cmd:'cancel'} (that
+        // episode then plays to its end, and the chain stops), or
+        // {cmd:'scale', creditsScale} (the card came too early: later from
+        // the next episode on).
         // Each queued LOAD carries the app's own load id, so the app knows
         // which episode the TV is on; what the TV finished is kept for an app
         // that comes back later ({type:'queue', current, left, history}).
         const QUEUE_MAX = 50;
         const HISTORY_MAX = 30;
-        const CREDITS_FACTOR = 0.06;
+        const CREDITS_SHARE = 0.03;
+        const CREDITS_MIN_S = 30;
+        const CREDITS_MAX_S = 120;
+        const CREDITS_FLOOR_S = 12;
+        const clampScale = (v) => Math.min(1, Math.max(0.3, Number(v) || 1));
+        // Seconds before the end where the card shows (CreditsTiming.window).
+        function creditsWindow(dur, scale) {
+            const base = Math.min(CREDITS_MAX_S, Math.max(CREDITS_MIN_S, Math.round(dur * CREDITS_SHARE)));
+            return Math.max(CREDITS_FLOOR_S, Math.round(base * clampScale(scale)));
+        }
         let carriedQueue = null;      // the rest of the queue, for the episode on its way
         const queueHistory = [];      // { loadId, pos, dur, finished }
 
@@ -1900,6 +1912,10 @@
                 if (s.queue && s.queue.items.length) advanceQueue(s, 'app');
                 return;
             }
+            if (data.cmd === 'scale') {
+                if (s.queue) s.queue.creditsScale = clampScale(data.creditsScale);
+                return;
+            }
             if (data.cmd === 'cancel') {
                 if (s.queue) {
                     s.queue.cancelled = true;
@@ -1917,6 +1933,7 @@
                 items,
                 autoAdvance: data.autoAdvance !== false,
                 countdownSec: Math.min(30, Math.max(3, Number(data.countdownSec) || 8)),
+                creditsScale: clampScale(data.creditsScale),
                 cancelled: false,
                 anchor: -1,
                 shownLeft: 0,
@@ -1936,8 +1953,7 @@
             const dur = video.duration;
             if (!isFinite(dur) || dur < 60) return;
             const pos = video.currentTime;
-            const creditsAt = Math.min(180, Math.max(30, Math.round(dur * CREDITS_FACTOR)));
-            if (dur - pos > creditsAt) {
+            if (dur - pos > creditsWindow(dur, q.creditsScale)) {
                 if (q.anchor >= 0) {
                     q.anchor = -1;
                     q.shownLeft = 0;
@@ -1975,6 +1991,7 @@
                 items: q.items.slice(1),
                 autoAdvance: q.autoAdvance,
                 countdownSec: q.countdownSec,
+                creditsScale: q.creditsScale,
             };
             q.items = [];
             hideUpNext();
