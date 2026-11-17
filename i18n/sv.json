@@ -37,5 +37,15 @@
  "undecodableSubtitle": "Den sänds i en form som tv:ns spelare inte kan läsa (vanligt med kanaler i 1080i med radsprång). Titta på din telefon.",
  "stalledTitle": "Bilden frös",
  "stalledSubtitle": "Den kunde inte återhämta sig på egen hand. Tryck på \"Försök igen\" eller titta på din telefon.",
- "retry": "Försök igen"
+ "retry": "Försök igen",
+ "vodCodecTitle": "Den här tv:n kan inte spela upp den här videon",
+ "vodCodecSubtitle": "Formatet är mer än den här tv:n eller Chromecasten klarar. Titta på din telefon.",
+ "vodVideoSubtitle": "Bilden är i {format}, som den här tv:n eller Chromecasten inte kan avkoda. Titta på din telefon.",
+ "vodAudioSubtitle": "Ljudet är i {format}, som den här tv:n eller Chromecasten inte kan spela upp. Titta på din telefon.",
+ "notVideoTitle": "Din leverantör skickade en sida i stället för videon",
+ "notVideoSubtitle": "Ditt abonnemang kan ha gått ut, eller så har din leverantör problem. Kontrollera att den spelas upp på din telefon.",
+ "slowTitle": "Det tar längre tid än vanligt…",
+ "slowDetail": "Vissa filer tar en stund att starta på den här tv:n. Den startar av sig själv.",
+ "upNextLabel": "Nästa avsnitt",
+ "upNextIn": "Börjar om {seconds} s"
 }

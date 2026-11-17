@@ -37,5 +37,15 @@
  "undecodableSubtitle": "Transmetohet në një formë që luajtësi i televizorit nuk mund ta lexojë (ndodh shpesh me kanalet 1080i të ndërthurura). Shikoje në telefonin tënd.",
  "stalledTitle": "Figura ngriu",
  "stalledSubtitle": "Nuk u rregullua dot vetë. Shtyp \"Riprovo\" ose shikoje në telefonin tënd.",
- "retry": "Riprovo"
+ "retry": "Riprovo",
+ "vodCodecTitle": "Ky televizor nuk mund ta luajë këtë video",
+ "vodCodecSubtitle": "Formati i saj është më shumë nga sa mund të përballojë ky televizor ose Chromecast. Shikoje në telefonin tënd.",
+ "vodVideoSubtitle": "Pamja është në {format}, që ky televizor ose Chromecast nuk mund ta deshifrojë. Shikoje në telefonin tënd.",
+ "vodAudioSubtitle": "Zëri është në {format}, që ky televizor ose Chromecast nuk mund ta luajë. Shikoje në telefonin tënd.",
+ "notVideoTitle": "Ofruesi yt dërgoi një faqe në vend të videos",
+ "notVideoSubtitle": "Abonimi yt mund të ketë mbaruar, ose ofruesi yt ka probleme. Kontrollo nëse luhet në telefonin tënd.",
+ "slowTitle": "Po zgjat më shumë se zakonisht…",
+ "slowDetail": "Disa skedarë kanë nevojë për pak kohë që të nisin në këtë televizor. Do të nisë vetë.",
+ "upNextLabel": "Episodi tjetër",
+ "upNextIn": "Nis pas {seconds} s"
 }

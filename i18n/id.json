@@ -37,5 +37,15 @@
  "undecodableSubtitle": "Saluran ini disiarkan dalam bentuk yang tidak dapat dibaca pemutar TV (sering terjadi pada saluran 1080i interlaced). Tonton di ponsel Anda.",
  "stalledTitle": "Gambar membeku",
  "stalledSubtitle": "Pemutaran tidak dapat pulih sendiri. Tekan \"Coba Lagi\", atau tonton di ponsel Anda.",
- "retry": "Coba Lagi"
+ "retry": "Coba Lagi",
+ "vodCodecTitle": "TV ini tidak dapat memutar video ini",
+ "vodCodecSubtitle": "Formatnya melebihi kemampuan TV atau Chromecast ini. Tonton di ponsel Anda.",
+ "vodVideoSubtitle": "Gambarnya dalam {format}, yang tidak dapat didekode oleh TV atau Chromecast ini. Tonton di ponsel Anda.",
+ "vodAudioSubtitle": "Suaranya dalam {format}, yang tidak dapat diputar oleh TV atau Chromecast ini. Tonton di ponsel Anda.",
+ "notVideoTitle": "Penyedia Anda mengirim halaman, bukan video",
+ "notVideoSubtitle": "Langganan Anda mungkin sudah berakhir, atau penyedia Anda sedang bermasalah. Periksa apakah video ini bisa diputar di ponsel Anda.",
+ "slowTitle": "Memakan waktu lebih lama dari biasanya…",
+ "slowDetail": "Beberapa file butuh waktu untuk mulai di TV ini. Video akan mulai dengan sendirinya.",
+ "upNextLabel": "Episode berikutnya",
+ "upNextIn": "Mulai dalam {seconds} dtk"
 }

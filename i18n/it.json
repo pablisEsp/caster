@@ -37,5 +37,15 @@
  "undecodableSubtitle": "Viene trasmesso in una forma che il lettore della TV non sa leggere (succede spesso con i canali in 1080i interlacciato). Guardalo sul tuo telefono.",
  "stalledTitle": "L'immagine si è bloccata",
  "stalledSubtitle": "Non è riuscita a riprendersi da sola. Premi “Riprova”, oppure guardalo sul tuo telefono.",
- "retry": "Riprova"
+ "retry": "Riprova",
+ "vodCodecTitle": "Questa TV non può riprodurre questo video",
+ "vodCodecSubtitle": "Il suo formato è troppo per questa TV o questo Chromecast. Guardalo sul tuo telefono.",
+ "vodVideoSubtitle": "L'immagine è in {format}, che questa TV o questo Chromecast non può decodificare. Guardalo sul tuo telefono.",
+ "vodAudioSubtitle": "L'audio è in {format}, che questa TV o questo Chromecast non può riprodurre. Guardalo sul tuo telefono.",
+ "notVideoTitle": "Il tuo provider ha inviato una pagina invece del video",
+ "notVideoSubtitle": "Il tuo abbonamento potrebbe essere scaduto, oppure il tuo provider ha dei problemi. Controlla che si riproduca sul tuo telefono.",
+ "slowTitle": "Ci vuole più del solito…",
+ "slowDetail": "Alcuni file impiegano un po' ad avviarsi su questa TV. Partirà da solo.",
+ "upNextLabel": "Prossimo episodio",
+ "upNextIn": "Inizia tra {seconds} s"
 }

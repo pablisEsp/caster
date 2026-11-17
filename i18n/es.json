@@ -37,5 +37,15 @@
  "undecodableSubtitle": "Se emite de una forma que el reproductor de la tele no puede leer (pasa a menudo con canales en 1080i entrelazado). Míralo en el móvil.",
  "stalledTitle": "La imagen se ha congelado",
  "stalledSubtitle": "No ha podido recuperarse sola. Pulsa Reintentar o míralo en el móvil.",
- "retry": "Reintentar"
+ "retry": "Reintentar",
+ "vodCodecTitle": "Esta tele no puede reproducir este vídeo",
+ "vodCodecSubtitle": "Su formato es más de lo que esta tele o este Chromecast pueden manejar. Míralo en el móvil.",
+ "vodVideoSubtitle": "Su imagen está en {format}, que esta tele o este Chromecast no pueden decodificar. Míralo en el móvil.",
+ "vodAudioSubtitle": "Su sonido está en {format}, que esta tele o este Chromecast no pueden reproducir. Míralo en el móvil.",
+ "notVideoTitle": "Tu proveedor ha enviado una página en lugar del vídeo",
+ "notVideoSubtitle": "Puede que tu suscripción haya terminado o que tu proveedor tenga problemas. Comprueba que se reproduce en el móvil.",
+ "slowTitle": "Está tardando más de lo normal…",
+ "slowDetail": "Algunos archivos tardan en empezar en esta tele. Empezará por sí solo.",
+ "upNextLabel": "Siguiente episodio",
+ "upNextIn": "Empieza en {seconds} s"
 }

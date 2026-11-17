@@ -37,5 +37,15 @@
  "undecodableSubtitle": "Er wird in einer Form gesendet, die der Player des Fernsehers nicht lesen kann (häufig bei Kanälen in 1080i mit Zeilensprung). Sieh ihn dir auf deinem Handy an.",
  "stalledTitle": "Das Bild ist eingefroren",
  "stalledSubtitle": "Die Wiedergabe konnte sich nicht von selbst erholen. Drück auf „Erneut versuchen“ oder sieh es dir auf deinem Handy an.",
- "retry": "Erneut versuchen"
+ "retry": "Erneut versuchen",
+ "vodCodecTitle": "Dieser Fernseher kann dieses Video nicht abspielen",
+ "vodCodecSubtitle": "Sein Format ist mehr, als dieser Fernseher oder Chromecast verarbeiten kann. Sieh es dir auf deinem Handy an.",
+ "vodVideoSubtitle": "Das Bild ist in {format}, das dieser Fernseher oder Chromecast nicht decodieren kann. Sieh es dir auf deinem Handy an.",
+ "vodAudioSubtitle": "Der Ton ist in {format}, das dieser Fernseher oder Chromecast nicht abspielen kann. Sieh es dir auf deinem Handy an.",
+ "notVideoTitle": "Dein Anbieter hat statt des Videos eine Seite geschickt",
+ "notVideoSubtitle": "Vielleicht ist dein Abo abgelaufen oder dein Anbieter hat Probleme. Prüfe, ob es auf deinem Handy läuft.",
+ "slowTitle": "Dauert länger als üblich…",
+ "slowDetail": "Manche Dateien brauchen auf diesem Fernseher eine Weile zum Starten. Es startet von selbst.",
+ "upNextLabel": "Nächste Folge",
+ "upNextIn": "Startet in {seconds} s"
 }

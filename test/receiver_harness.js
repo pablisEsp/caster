@@ -2,6 +2,7 @@
 // CAF and hls.js, plus a manual clock, and checks the playback-session logic.
 'use strict';
 const fs = require('fs');
+const path = require('path');
 const vm = require('vm');
 const assert = require('assert');
 
@@ -62,10 +63,11 @@ function setup({ storage = {}, lang = LANG } = {}) {
   const video = Object.assign(makeEl('media'), {
     currentTime: 0, paused: true, readyState: 0, src: '', error: null,
     seekable: { length: 0 }, buffered: { length: 0 },
+    duration: NaN, videoWidth: 0, videoHeight: 0, webkitDecodedFrameCount: 0,
     playCalls: 0,
     play() { this.playCalls++; this.paused = false; return Promise.resolve(); },
     pause() { this.paused = true; },
-    load() {}, removeAttribute(a) { if (a === 'src') this.src = ''; },
+    load() { this.error = null; }, removeAttribute(a) { if (a === 'src') this.src = ''; },
     canPlayType: () => '',
   });
   els.media = video;
@@ -102,6 +104,11 @@ function setup({ storage = {}, lang = LANG } = {}) {
   // ── CAF fake ──
   const interceptors = {};
   const customListeners = {};
+  // LOADs the page makes itself (playerManager.load). [cafRoutesOwnLoads]:
+  // whether CAF passes them through the LOAD interceptor (undocumented); when
+  // it doesn't, CAF gives the element the file itself.
+  const loads = [];
+  const cafSettings = { routesOwnLoads: true };
   const sent = [];            // {ns, to, msg} from context.sendCustomMessage
   let startOptions = null;
   // What this fake device decodes: MSE types and canDisplayType answers.
@@ -112,7 +119,16 @@ function setup({ storage = {}, lang = LANG } = {}) {
   class ErrorData { constructor(type) { this.type = type; } }
   const cast = { framework: {
     CastReceiverContext: { getInstance: () => ({
-      getPlayerManager: () => ({ setMessageInterceptor: (t, fn) => { interceptors[t] = fn; }, broadcastStatus() {} }),
+      getPlayerManager: () => ({
+        setMessageInterceptor: (t, fn) => { interceptors[t] = fn; }, broadcastStatus() {},
+        getMediaInformation: () => null,
+        load: (req) => {
+          loads.push(req);
+          if (cafSettings.routesOwnLoads) return Promise.resolve(interceptors.LOAD(req));
+          video.src = req.media.contentUrl || req.media.contentId;
+          return Promise.resolve();
+        },
+      }),
       start(options) { startOptions = options; },
       addCustomMessageListener: (ns, fn) => { customListeners[ns] = fn; },
       sendCustomMessage: (ns, to, msg) => { sent.push({ ns, to, msg: JSON.parse(JSON.stringify(msg)) }); },
@@ -124,11 +140,42 @@ function setup({ storage = {}, lang = LANG } = {}) {
       MessageType: { LOAD: 'LOAD', PLAY: 'PLAY', PAUSE: 'PAUSE', SEEK: 'SEEK' },
       StreamType: { LIVE: 'LIVE', BUFFERED: 'BUFFERED' },
       ErrorData, ErrorType: { LOAD_FAILED: 'LOAD_FAILED' }, ErrorReason: { GENERIC_LOAD_ERROR: 'GENERIC_LOAD_ERROR' },
+      LoadRequestData: class { constructor() { this.media = null; this.customData = null; } },
+      MediaInformation: class {},
+      TvShowMediaMetadata: class { constructor() { this.metadataType = 2; } },
+      Image: class { constructor(url) { this.url = url; } },
       Command: { ALL_BASIC_MEDIA: 1 },
     },
   } };
 
+  // The provider as the page's fetch() sees it: answer(url) → { status,
+  // body (bytes) } or { fails: true } (no CORS headers, network down).
+  // readsWhileBusy: reads made while the element still held the file (with a
+  // one-connection account the provider refuses them, or cuts the picture).
+  const provider = { answer: () => ({ status: 200, body: fixture('h264_aac.mkv') }), fetches: [], readsWhileBusy: 0 };
+  const fetch = (url) => {
+    provider.fetches.push(url);
+    if (video.src) { provider.readsWhileBusy++; readsWhileBusy.n++; }
+    const a = provider.answer(url);
+    if (a.fails) return Promise.reject(new TypeError('Failed to fetch'));
+    const body = a.body || new Uint8Array(0);
+    let at = 0;
+    return Promise.resolve({
+      ok: a.status >= 200 && a.status < 300, status: a.status,
+      body: { getReader: () => ({
+        read: () => {
+          if (at >= body.length) return Promise.resolve({ done: true });
+          const value = body.subarray(at, at + 4096); at += 4096;
+          return Promise.resolve({ done: false, value });
+        },
+        cancel() {},
+      }) },
+    });
+  };
+  class AbortController { constructor() { this.signal = {}; } abort() { this.aborted = true; } }
+
   const ctx = {
+    fetch, AbortController, Uint8Array,
     console, URL, URLSearchParams, Promise, Date: { now: () => clock.now() },
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, setInterval: clock.setInterval,
     document: { getElementById: getEl, documentElement: { lang: 'en', dir: 'ltr' } },
@@ -156,7 +203,12 @@ function setup({ storage = {}, lang = LANG } = {}) {
   const ev = (expr) => vm.runInContext(expr, ctx);
   const statuses = () => sent.filter((x) => x.msg.type === 'status').map((x) => x.msg);
   const fromApp = (data, senderId = 'app-1') => customListeners['urn:x-cast:com.nipaplayer.cast']({ senderId, data });
-  return { ctx, ev, clock, video, els, instances, interceptors, Hls, sent, statuses, fromApp, device, startOptions: () => startOptions };
+  return { ctx, ev, clock, video, els, instances, interceptors, Hls, sent, statuses, fromApp, device, startOptions: () => startOptions, provider, loads, caf: cafSettings };
+}
+
+// The start of a test file (made with ffmpeg from test patterns), as a provider sends it.
+function fixture(name) {
+  return new Uint8Array(fs.readFileSync(path.join(__dirname, 'fixtures', `${name}.head`)));
 }
 
 function loadReq(url, { contentType = 'application/x-mpegURL', live = true, features = { resumeV2: true, seekV2: true } } = {}) {
@@ -178,6 +230,7 @@ let settled;
 function watch(p) { settled = undefined; p.then((v) => { settled = v; }); }
 
 const allInstances = [];
+const readsWhileBusy = { n: 0 };
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
@@ -714,12 +767,408 @@ test('legacy app: no load id, LOAD semantics unchanged (resolved on the first pi
   assert(settled && settled.media);
 });
 
+
+// ── Movies and episodes (native engine) ──
+
+function vodReq(url, loadId, { start = 0, features = NIPA, contentType = 'video/x-matroska' } = {}) {
+  const r = loadReq(url, { contentType, live: false, features });
+  r.currentTime = start;
+  if (loadId) r.customData.nipa = { v: 1, loadId, locale: 'en-GB' };
+  return r;
+}
+// A native LOAD as CAF runs it: the interceptor, then the file into the element.
+function loadVod(env, req) {
+  const p = env.interceptors.LOAD(req);
+  env.video.src = req.media.contentUrl;
+  watch(Promise.resolve(p));
+  return p;
+}
+const mediaError = (env, code = 4, message = '') => { env.video.error = { code, message }; env.video.fire('error'); };
+const playFor = (env, seconds) => { env.video.paused = false; env.video.currentTime += seconds; env.video.fire('playing'); };
+
+test('movie, account busy (458): waits, asks again, reloads through CAF from the resume point, plays', async () => {
+  const env = setup();
+  env.provider.answer = () => ({ status: 458 });
+  loadVod(env, vodReq('http://p.example/movie/u/p/1.mkv', 'M1', { start: 120 }));
+  await flush();
+  assert(settled && settled.media, 'resolved at once: CAF loads the file');
+  assert.strictEqual(last(env).state, 'starting');
+  mediaError(env);
+  await flush();
+  let st = last(env);
+  assert.strictEqual(st.state, 'waitingSlot', JSON.stringify(st));
+  assert.strictEqual(st.wait.http, 458);
+  assert.strictEqual(overlay(env).loadingText, 'Waiting for your provider…');
+  assert.strictEqual(env.video.src, '', 'the element let go of the connection first');
+  env.clock.advance(4000); await flush();
+  assert.strictEqual(env.provider.fetches.length, 2, 'asked again after 4 s');
+  assert.strictEqual(env.loads.length, 0, 'no reload while it still refuses');
+  env.provider.answer = () => ({ status: 200, body: fixture('h264_aac.mkv') });
+  env.clock.advance(6000); await flush();
+  assert.strictEqual(env.loads.length, 1, 'reloaded through CAF once free');
+  const r = env.loads[0];
+  assert.strictEqual(r.currentTime, 120, 'from where the user resumes');
+  assert(r.customData.nipaInternal, 'marked as the receiver\'s own');
+  assert.strictEqual(r.media.contentUrl, 'http://p.example/movie/u/p/1.mkv');
+  assert.strictEqual(env.ev('session.loadId'), 'M1', 'the same session, not a new LOAD');
+  env.video.fire('loadedmetadata');
+  st = last(env);
+  assert.strictEqual(st.state, 'buffering');
+  assert(!st.wait, 'the wait is over');
+  playFor(env, 1);
+  assert.strictEqual(last(env).state, 'playing');
+});
+
+test('movie, account busy with an older app: the account screen at once, no reload', async () => {
+  const env = setup();
+  env.provider.answer = () => ({ status: 458 });
+  watch(env.interceptors.LOAD(loadReq('http://p.example/movie/u/p/1.mkv', { contentType: 'video/x-matroska', live: false })));
+  mediaError(env);
+  await flush();
+  const o = overlay(env);
+  assert(o.error && o.errorTitle === 'Las conexiones de tu cuenta están todas en uso', JSON.stringify(o));
+  assert.strictEqual(env.loads.length, 0);
+});
+
+test('movie with AAC 5.1: fails after the metadata, names the sound, and the TV keeps it in mind', async () => {
+  const storage = {};
+  const env = setup({ storage });
+  env.provider.answer = () => ({ status: 200, body: fixture('aac51.mkv') });
+  loadVod(env, vodReq('http://p.example/movie/u/secret/2.mkv', 'M2'));
+  env.video.fire('loadedmetadata');
+  mediaError(env, 4, 'PIPELINE_ERROR_INITIALIZATION_FAILED');
+  await flush();
+  const st = last(env);
+  assert.strictEqual(st.state, 'failed');
+  assert.deepStrictEqual(st.failure, { kind: 'codec', format: { part: 'audio', name: 'AAC 5.1' } });
+  const o = overlay(env);
+  assert.strictEqual(o.errorTitle, "This TV can't play this video");
+  assert(o.errorSubtitle.startsWith('Its sound is in AAC 5.1, which'), o.errorSubtitle);
+  assert.strictEqual(JSON.parse(storage['nipa.caps.learned']).aacMulti, false);
+  env.fromApp({ type: 'hello', v: 1 });
+  const hello = env.sent.filter((x) => x.msg.type === 'hello').at(-1).msg;
+  assert.strictEqual(hello.caps.aacMulti, false, 'the next hello says it');
+  assert.deepStrictEqual(hello.features, { vodCauses: 1, queue: 1 });
+  assert(!/secret|p\.example|http/i.test(JSON.stringify(env.sent)), 'no URL leaves the TV');
+});
+
+test('HEVC 10-bit: sound over black is stopped after 3 s and the picture is named', async () => {
+  const env = setup();
+  env.provider.answer = () => ({ status: 200, body: fixture('hevc10.mkv') });
+  loadVod(env, vodReq('http://p.example/movie/u/p/3.mkv', 'M3'));
+  env.video.fire('loadedmetadata');
+  playFor(env, 1);
+  env.clock.advance(2999); await flush();
+  assert.strictEqual(env.provider.fetches.length, 0, 'not before 3 s');
+  env.clock.advance(1); await flush();
+  assert.strictEqual(env.video.src, '', 'stopped first: the read needs the connection');
+  const st = last(env);
+  assert.deepStrictEqual(st.failure, { kind: 'codec', format: { part: 'video', name: 'HEVC (H.265), 10-bit' } });
+  assert(overlay(env).errorSubtitle.startsWith('Its picture is in HEVC (H.265), 10-bit, which'));
+});
+
+test('Xvid AVI (served as .mp4): named MPEG-4 Part 2', async () => {
+  const env = setup();
+  env.provider.answer = () => ({ status: 200, body: fixture('xvid.avi') });
+  loadVod(env, vodReq('http://p.example/movie/u/p/4.mp4', 'M4', { contentType: 'video/mp4' }));
+  env.video.fire('loadedmetadata');
+  playFor(env, 1);
+  env.clock.advance(3000); await flush();
+  assert.deepStrictEqual(last(env).failure.format, { part: 'video', name: 'MPEG-4 Part 2 (Xvid/DivX)' });
+});
+
+test('a picture: nothing is checked, nothing is read', async () => {
+  const env = setup();
+  loadVod(env, vodReq('http://p.example/movie/u/p/5.mkv', 'M5'));
+  env.video.fire('loadedmetadata');
+  env.video.videoWidth = 1280; env.video.videoHeight = 720; env.video.webkitDecodedFrameCount = 30;
+  playFor(env, 1);
+  env.clock.advance(10000); await flush();
+  assert.strictEqual(env.provider.fetches.length, 0);
+  assert.strictEqual(last(env).state, 'playing');
+});
+
+test('sound only on purpose (no video track in the file): carries on where it was', async () => {
+  const env = setup();
+  env.provider.answer = () => ({ status: 200, body: fixture('audio_only.mkv') });
+  loadVod(env, vodReq('http://p.example/movie/u/p/6.mkv', 'M6'));
+  env.video.fire('loadedmetadata');
+  playFor(env, 2);
+  env.video.fire('timeupdate');
+  env.clock.advance(3000); await flush();
+  assert.strictEqual(env.loads.length, 1, 'reloaded');
+  assert.strictEqual(env.loads[0].currentTime, 2, 'where it was');
+  assert(!overlay(env).error);
+  playFor(env, 1);
+  env.clock.advance(10000); await flush();
+  assert.strictEqual(env.provider.fetches.length, 1, 'not checked again');
+});
+
+test('the provider sends a page (HTTP 200, HTML): "a page instead of the video"', async () => {
+  const env = setup();
+  env.provider.answer = () => ({ status: 200, body: fixture('provider_page.html') });
+  loadVod(env, vodReq('http://p.example/movie/u/p/7.mkv', 'M7'));
+  mediaError(env);
+  await flush();
+  assert.strictEqual(last(env).failure.kind, 'notVideo');
+  assert.strictEqual(overlay(env).errorTitle, 'Your provider sent a page instead of the video');
+});
+
+test('404 and 403 on a movie: their own screens', async () => {
+  for (const [status, kind, title] of [[404, 'notFound', "It's no longer on your provider's server"], [403, 'auth', 'Your provider refused to play this on the TV']]) {
+    const env = setup();
+    env.provider.answer = () => ({ status });
+    loadVod(env, vodReq('http://p.example/movie/u/p/8.mkv', 'M8'));
+    mediaError(env);
+    await flush();
+    assert.deepStrictEqual(last(env).failure, { kind, http: status });
+    assert.strictEqual(overlay(env).errorTitle, title);
+  }
+});
+
+test("a provider that can't be read (no CORS): three reloads, then the generic screen", async () => {
+  const env = setup();
+  env.provider.answer = () => ({ fails: true });
+  loadVod(env, vodReq('http://p.example/movie/u/p/9.mkv', 'M9'));
+  for (let i = 1; i <= 3; i++) {
+    mediaError(env);
+    await flush();
+    assert.strictEqual(overlay(env).loadingText, 'Retrying...');
+    env.clock.advance(4000 * i); await flush();
+    assert.strictEqual(env.loads.length, i, `reload #${i}`);
+  }
+  mediaError(env);
+  await flush();
+  assert.strictEqual(last(env).state, 'failed');
+  assert.strictEqual(last(env).failure.kind, 'media');
+  assert.strictEqual(overlay(env).errorTitle, "The TV couldn't play this");
+});
+
+test('slow to open: says so after 12 s; then plays, or fails after 2 min', async () => {
+  const env = setup();
+  loadVod(env, vodReq('http://p.example/movie/u/p/10.mp4', 'M10', { contentType: 'video/mp4' }));
+  env.clock.advance(11999);
+  assert.notStrictEqual(overlay(env).loadingText, 'Taking longer than usual…');
+  env.clock.advance(1);
+  assert.strictEqual(overlay(env).loadingText, 'Taking longer than usual…');
+  assert(overlay(env).loadingDetail.includes('start on its own'));
+  assert.strictEqual(last(env).slow, true);
+  env.clock.advance(20000);
+  env.video.fire('loadedmetadata');
+  assert.strictEqual(last(env).slow, undefined, 'no longer slow');
+  assert.strictEqual(last(env).state, 'buffering');
+
+  const never = setup();
+  never.provider.answer = () => ({ status: 200, body: fixture('index_at_end.mp4') });
+  loadVod(never, vodReq('http://p.example/movie/u/p/11.mp4', 'M11', { contentType: 'video/mp4' }));
+  never.clock.advance(120000); await flush();
+  assert.strictEqual(last(never).state, 'failed');
+  assert.strictEqual(last(never).failure.kind, 'noPlayback');
+});
+
+test('broke after playing: reloads where it was', async () => {
+  const env = setup();
+  loadVod(env, vodReq('http://p.example/movie/u/p/12.mkv', 'M12'));
+  env.video.fire('loadedmetadata');
+  env.video.videoWidth = 1280; env.video.webkitDecodedFrameCount = 10;
+  playFor(env, 500);
+  env.video.fire('timeupdate');
+  mediaError(env, 2);
+  await flush();
+  assert.strictEqual(last(env).state, 'reconnecting');
+  env.clock.advance(1000); await flush();
+  assert.strictEqual(env.loads.length, 1);
+  assert.strictEqual(env.loads[0].currentTime, 500);
+});
+
+// ── Episode queue ──
+
+const ep = (n, extra = {}) => Object.assign({
+  loadId: `E${n}`, url: `http://p.example/series/u/secret/${100 + n}.mkv`, contentType: 'video/x-matroska',
+  title: `Episode ${n}`, seriesTitle: 'Show', season: 1, episode: n, imageUrl: `http://img.example/${n}.jpg`, start: 0,
+}, extra);
+const queueStates = (env, to) => env.sent.filter((x) => x.msg.type === 'queue' && (!to || x.to === to)).map((x) => x.msg);
+function startEpisode(env, loadId = 'E1') {
+  loadVod(env, vodReq(`http://p.example/series/u/secret/${loadId}.mkv`, loadId));
+  env.video.fire('loadedmetadata');
+  env.video.videoWidth = 1280; env.video.webkitDecodedFrameCount = 10;
+  env.video.duration = 2400;      // credits window: 6% = 144 s
+  env.video.currentTime = 0;
+  playFor(env, 1);
+}
+const at = (env, seconds) => { env.video.currentTime = seconds; env.video.fire('timeupdate'); };
+
+test('queue: at the credits, an 8 s count, then the TV loads the next episode itself, with its own id and the rest', async () => {
+  const env = setup();
+  startEpisode(env);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', autoAdvance: true, items: [ep(2, { start: 30 }), ep(3)] });
+  assert.deepStrictEqual(last(env).queue, { left: 2, auto: true, cancelled: false });
+  at(env, 2255);
+  assert(env.els.upnext.classList.contains('hidden'), 'not yet: 145 s left');
+  at(env, 2256);
+  assert(!env.els.upnext.classList.contains('hidden'), 'the card');
+  assert.strictEqual(env.els['upnext-title'].textContent, 'S1 · E2 — Episode 2');
+  assert.strictEqual(env.els['upnext-count'].textContent, 'Starts in 8 s');
+  assert.deepStrictEqual(last(env).upNext, { loadId: 'E2', inSec: 8, total: 8 });
+  at(env, 2260);
+  assert.strictEqual(env.els['upnext-count'].textContent, 'Starts in 4 s');
+  assert.strictEqual(env.loads.length, 0);
+  at(env, 2264);
+  assert.strictEqual(env.loads.length, 1, 'the next episode, by the TV');
+  const r = env.loads[0];
+  assert.strictEqual(r.customData.nipa.loadId, 'E2');
+  assert.strictEqual(r.customData.sender, 'nipa', 'the same handshake as the app\'s LOAD');
+  assert(r.customData.features.nipaStatus);
+  assert.strictEqual(r.currentTime, 30, 'from its own resume point');
+  assert.strictEqual(r.media.contentUrl, 'http://p.example/series/u/secret/102.mkv');
+  assert.strictEqual(r.media.metadata.seriesTitle, 'Show');
+  assert.strictEqual(r.media.metadata.episode, 2);
+  assert.strictEqual(r.media.metadata.images[0].url, 'http://img.example/2.jpg');
+  await flush();
+  assert.strictEqual(env.ev('session.loadId'), 'E2');
+  assert.strictEqual(env.ev('session.queue.items.length'), 1, 'the rest of the queue came along');
+  assert.strictEqual(last(env).loadId, 'E2');
+  const qs = queueStates(env).at(-1);
+  assert.strictEqual(qs.current, 'E2');
+  assert.deepStrictEqual(qs.left, ['E3']);
+  assert.deepStrictEqual(qs.history, [{ loadId: 'E1', pos: 2264, dur: 2400, finished: true }]);
+  assert(!/secret|p\.example|img\.example|http/i.test(JSON.stringify(env.sent)), 'no URL leaves the TV');
+});
+
+test('queue: pausing freezes the count; seeking back out of the credits hides the card', async () => {
+  const env = setup();
+  startEpisode(env);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', items: [ep(2)] });
+  at(env, 2300);
+  at(env, 2303);
+  assert.strictEqual(env.els['upnext-count'].textContent, 'Starts in 5 s');
+  env.clock.advance(60000);
+  at(env, 2303);
+  assert.strictEqual(env.loads.length, 0, 'paused: no time passes for the count');
+  at(env, 1000);
+  assert(env.els.upnext.classList.contains('hidden'));
+  assert.strictEqual(last(env).upNext, undefined);
+  at(env, 2300);
+  assert.strictEqual(env.els['upnext-count'].textContent, 'Starts in 8 s', 'a fresh count');
+});
+
+test('queue: an episode that reaches its end goes on at once', async () => {
+  const env = setup();
+  startEpisode(env);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', items: [ep(2)] });
+  env.video.currentTime = 2400;
+  env.video.fire('ended');
+  assert.strictEqual(env.loads.length, 1);
+  await flush();
+  assert.strictEqual(env.ev('session.loadId'), 'E2');
+  assert(!env.statuses().some((x) => x.loadId === 'E1' && x.state === 'ended'), 'not reported as the end of the cast');
+});
+
+test('queue: cancel from the app lets the episode end, and nothing follows', async () => {
+  const env = setup();
+  startEpisode(env);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', items: [ep(2)] });
+  at(env, 2300);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', cmd: 'cancel' });
+  assert(env.els.upnext.classList.contains('hidden'));
+  assert.strictEqual(last(env).queue.cancelled, true);
+  at(env, 2399);
+  env.video.fire('ended');
+  assert.strictEqual(env.loads.length, 0);
+  assert.strictEqual(last(env).state, 'ended');
+});
+
+test('queue: "next" from the app starts it now', async () => {
+  const env = setup();
+  startEpisode(env);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', items: [ep(2)] });
+  at(env, 600);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', cmd: 'next' });
+  assert.strictEqual(env.loads.length, 1);
+  await flush();
+  assert.strictEqual(env.ev('session.loadId'), 'E2');
+});
+
+test("queue: one for another LOAD is ignored; the app's own new LOAD drops the queue", async () => {
+  const env = setup();
+  startEpisode(env);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'OLD', items: [ep(2)] });
+  assert.strictEqual(env.ev('session.queue'), null);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', items: [ep(2)] });
+  startEpisode(env, 'X9');
+  assert.strictEqual(env.ev('session.queue'), null, 'a channel picked on the phone has no queue');
+  env.video.fire('ended');
+  assert.strictEqual(env.loads.length, 0);
+});
+
+test('queue: autoAdvance off: no card, the end is the end', async () => {
+  const env = setup();
+  startEpisode(env);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', autoAdvance: false, items: [ep(2)] });
+  at(env, 2300);
+  assert(env.els.upnext.classList.contains('hidden'));
+  env.video.fire('ended');
+  assert.strictEqual(env.loads.length, 0);
+  assert.strictEqual(last(env).state, 'ended');
+});
+
+test('queue: CAF loading the episode without the interceptor is followed by hand', async () => {
+  const env = setup();
+  env.caf.routesOwnLoads = false;
+  startEpisode(env);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', items: [ep(2), ep(3)] });
+  env.video.fire('ended');
+  await flush();
+  assert.strictEqual(env.ev('session.loadId'), 'E2', 'its session, by hand');
+  assert.strictEqual(env.video.src, 'http://p.example/series/u/secret/102.mkv', "CAF's file left in the element");
+  assert.strictEqual(env.ev('session.queue.items.length'), 1);
+  assert.strictEqual(queueStates(env).at(-1).current, 'E2');
+});
+
+test('queue: an app that comes back learns which episodes the TV played meanwhile', async () => {
+  const env = setup();
+  startEpisode(env);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', items: [ep(2), ep(3)] });
+  env.video.currentTime = 2400; env.video.fire('ended');
+  await flush();
+  env.video.duration = 2400; env.video.currentTime = 2400; env.video.fire('ended');
+  await flush();
+  assert.strictEqual(env.ev('session.loadId'), 'E3');
+  env.fromApp({ type: 'hello', v: 1, app: 'nipa', locale: 'es-ES' }, 'app-2');
+  const toApp = env.sent.filter((x) => x.to === 'app-2').map((x) => x.msg.type);
+  assert.deepStrictEqual(toApp, ['hello', 'status', 'queue']);
+  const qs = queueStates(env, 'app-2')[0];
+  assert.strictEqual(qs.current, 'E3');
+  assert.deepStrictEqual(qs.history.map((h) => h.loadId), ['E1', 'E2']);
+  assert(qs.history.every((h) => h.finished));
+});
+
+test('queue: the next episode failing (e.g. HEVC) stops on its explanation, the queue kept for "next"', async () => {
+  const env = setup();
+  startEpisode(env);
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E1', items: [ep(2), ep(3)] });
+  env.video.fire('ended');
+  await flush();
+  env.provider.answer = () => ({ status: 200, body: fixture('hevc10.mkv') });
+  env.video.videoWidth = 0; env.video.webkitDecodedFrameCount = 0;
+  env.video.fire('loadedmetadata');
+  playFor(env, 1);
+  env.clock.advance(3000); await flush();
+  assert.strictEqual(last(env).loadId, 'E2');
+  assert.strictEqual(last(env).state, 'failed');
+  env.fromApp({ type: 'queue', v: 1, forLoadId: 'E2', cmd: 'next' });
+  await flush();
+  assert.strictEqual(env.ev('session.loadId'), 'E3');
+});
+
 (async () => {
   let failed = 0;
   for (const [name, fn] of tests) {
     try {
       allInstances.length = 0;
+      readsWhileBusy.n = 0;
       await fn();
+      assert.strictEqual(readsWhileBusy.n, 0, `${readsWhileBusy.n} read(s) of the file while the element held it`);
       const bad = allInstances.filter((h) => h.destroyedDuringEmit).length;
       assert.strictEqual(bad, 0, `${bad} hls instance(s) destroyed inside their own event callback`);
       console.log('ok  ', name);

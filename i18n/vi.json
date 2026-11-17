@@ -37,5 +37,15 @@
  "undecodableSubtitle": "Kênh này được phát ở dạng mà trình phát của TV không đọc được (thường gặp với kênh 1080i xen kẽ). Hãy xem trên điện thoại của bạn.",
  "stalledTitle": "Hình ảnh bị đứng",
  "stalledSubtitle": "Không thể tự khôi phục. Hãy nhấn \"Thử lại\" hoặc xem trên điện thoại của bạn.",
- "retry": "Thử lại"
+ "retry": "Thử lại",
+ "vodCodecTitle": "TV này không thể phát video này",
+ "vodCodecSubtitle": "Định dạng của video vượt quá khả năng của TV hoặc Chromecast này. Hãy xem trên điện thoại của bạn.",
+ "vodVideoSubtitle": "Hình ảnh ở định dạng {format}, mà TV hoặc Chromecast này không giải mã được. Hãy xem trên điện thoại của bạn.",
+ "vodAudioSubtitle": "Âm thanh ở định dạng {format}, mà TV hoặc Chromecast này không phát được. Hãy xem trên điện thoại của bạn.",
+ "notVideoTitle": "Nhà cung cấp của bạn đã gửi một trang thay vì video",
+ "notVideoSubtitle": "Có thể gói thuê bao của bạn đã hết hạn hoặc nhà cung cấp đang gặp sự cố. Hãy kiểm tra xem video có phát được trên điện thoại của bạn không.",
+ "slowTitle": "Lâu hơn bình thường…",
+ "slowDetail": "Một số tệp cần chút thời gian để bắt đầu trên TV này. Video sẽ tự bắt đầu.",
+ "upNextLabel": "Tập tiếp theo",
+ "upNextIn": "Bắt đầu sau {seconds} giây"
 }

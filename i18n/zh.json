@@ -37,5 +37,15 @@
  "undecodableSubtitle": "此频道的播出格式是电视播放器无法读取的（隔行扫描的 1080i 频道常有这种情况）。请在您的手机上观看。",
  "stalledTitle": "画面卡住了",
  "stalledSubtitle": "无法自行恢复。请按“重试”，或在您的手机上观看。",
- "retry": "重试"
+ "retry": "重试",
+ "vodCodecTitle": "这台电视无法播放此视频",
+ "vodCodecSubtitle": "此视频的格式超出了这台电视或 Chromecast 的处理能力。请在您的手机上观看。",
+ "vodVideoSubtitle": "其画面为 {format} 格式，这台电视或 Chromecast 无法解码。请在您的手机上观看。",
+ "vodAudioSubtitle": "其声音为 {format} 格式，这台电视或 Chromecast 无法播放。请在您的手机上观看。",
+ "notVideoTitle": "您的提供商发送了一个网页，而不是视频",
+ "notVideoSubtitle": "您的订阅可能已到期，或者您的提供商出现了问题。请确认它能否在您的手机上播放。",
+ "slowTitle": "比平时用时更长…",
+ "slowDetail": "有些文件在这台电视上需要一点时间才能开始播放。它会自动开始。",
+ "upNextLabel": "下一集",
+ "upNextIn": "{seconds} 秒后开始"
 }

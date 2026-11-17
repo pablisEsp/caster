@@ -37,5 +37,15 @@
  "undecodableSubtitle": "Ia disiarkan dalam bentuk yang tidak dapat dibaca oleh pemain TV (biasa berlaku pada saluran 1080i berjalin). Tonton pada telefon anda.",
  "stalledTitle": "Gambar membeku",
  "stalledSubtitle": "Ia tidak dapat pulih dengan sendirinya. Tekan “Cuba Lagi”, atau tonton pada telefon anda.",
- "retry": "Cuba Lagi"
+ "retry": "Cuba Lagi",
+ "vodCodecTitle": "TV ini tidak dapat memainkan video ini",
+ "vodCodecSubtitle": "Formatnya melebihi kemampuan TV atau Chromecast ini. Tonton pada telefon anda.",
+ "vodVideoSubtitle": "Gambarnya dalam {format}, yang tidak dapat dinyahkod oleh TV atau Chromecast ini. Tonton pada telefon anda.",
+ "vodAudioSubtitle": "Bunyinya dalam {format}, yang tidak dapat dimainkan oleh TV atau Chromecast ini. Tonton pada telefon anda.",
+ "notVideoTitle": "Penyedia anda menghantar halaman, bukan video",
+ "notVideoSubtitle": "Langganan anda mungkin telah tamat, atau penyedia anda menghadapi masalah. Semak sama ada video ini boleh dimainkan pada telefon anda.",
+ "slowTitle": "Mengambil masa lebih lama daripada biasa…",
+ "slowDetail": "Sesetengah fail mengambil sedikit masa untuk bermula pada TV ini. Ia akan bermula dengan sendirinya.",
+ "upNextLabel": "Episod seterusnya",
+ "upNextIn": "Bermula dalam {seconds} s"
 }

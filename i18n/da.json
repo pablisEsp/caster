@@ -37,5 +37,15 @@
  "undecodableSubtitle": "Den sendes i en form, som tv'ets afspiller ikke kan læse (det sker ofte med kanaler i interlaced 1080i). Se den på din telefon.",
  "stalledTitle": "Billedet frøs",
  "stalledSubtitle": "Afspilningen kunne ikke genoptages af sig selv. Tryk på \"Prøv igen\", eller se det på din telefon.",
- "retry": "Prøv igen"
+ "retry": "Prøv igen",
+ "vodCodecTitle": "Dette tv kan ikke afspille denne video",
+ "vodCodecSubtitle": "Formatet er mere, end dette tv eller denne Chromecast kan klare. Se den på din telefon.",
+ "vodVideoSubtitle": "Billedet er i {format}, som dette tv eller denne Chromecast ikke kan afkode. Se den på din telefon.",
+ "vodAudioSubtitle": "Lyden er i {format}, som dette tv eller denne Chromecast ikke kan afspille. Se den på din telefon.",
+ "notVideoTitle": "Din udbyder sendte en side i stedet for videoen",
+ "notVideoSubtitle": "Dit abonnement kan være udløbet, eller din udbyder har problemer. Tjek, at den afspilles på din telefon.",
+ "slowTitle": "Det tager længere tid end normalt…",
+ "slowDetail": "Nogle filer er lidt tid om at starte på dette tv. Den starter af sig selv.",
+ "upNextLabel": "Næste afsnit",
+ "upNextIn": "Starter om {seconds} s"
 }

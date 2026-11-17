@@ -37,5 +37,15 @@
  "undecodableSubtitle": "TV'nin oynatıcısının okuyamadığı bir biçimde yayınlanıyor (geçmeli 1080i kanallarda sık görülür). Telefonunuzda izleyin.",
  "stalledTitle": "Görüntü dondu",
  "stalledSubtitle": "Kendiliğinden düzelemedi. \"Tekrar Dene\"ye basın veya telefonunuzda izleyin.",
- "retry": "Tekrar Dene"
+ "retry": "Tekrar Dene",
+ "vodCodecTitle": "Bu TV bu videoyu oynatamıyor",
+ "vodCodecSubtitle": "Biçimi bu TV'nin veya Chromecast'in kaldırabileceğinden fazla. Telefonunuzda izleyin.",
+ "vodVideoSubtitle": "Görüntüsü {format} biçiminde ve bu TV veya Chromecast bunu çözemiyor. Telefonunuzda izleyin.",
+ "vodAudioSubtitle": "Sesi {format} biçiminde ve bu TV veya Chromecast bunu oynatamıyor. Telefonunuzda izleyin.",
+ "notVideoTitle": "Sağlayıcınız video yerine bir sayfa gönderdi",
+ "notVideoSubtitle": "Aboneliğiniz sona ermiş ya da sağlayıcınız sorun yaşıyor olabilir. Telefonunuzda oynatılıp oynatılmadığını kontrol edin.",
+ "slowTitle": "Normalden uzun sürüyor…",
+ "slowDetail": "Bazı dosyaların bu TV'de başlaması biraz zaman alır. Kendiliğinden başlayacak.",
+ "upNextLabel": "Sonraki bölüm",
+ "upNextIn": "{seconds} sn içinde başlıyor"
 }

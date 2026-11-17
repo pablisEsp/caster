@@ -37,5 +37,15 @@
  "undecodableSubtitle": "Het wordt uitgezonden in een vorm die de speler van de tv niet kan lezen (komt vaak voor bij kanalen in interlaced 1080i). Kijk op je telefoon.",
  "stalledTitle": "Het beeld is bevroren",
  "stalledSubtitle": "Het kon zich niet vanzelf herstellen. Druk op “Opnieuw proberen” of kijk op je telefoon.",
- "retry": "Opnieuw proberen"
+ "retry": "Opnieuw proberen",
+ "vodCodecTitle": "Deze tv kan deze video niet afspelen",
+ "vodCodecSubtitle": "Het formaat is meer dan deze tv of Chromecast aankan. Kijk het op je telefoon.",
+ "vodVideoSubtitle": "Het beeld is in {format}, dat deze tv of Chromecast niet kan decoderen. Kijk het op je telefoon.",
+ "vodAudioSubtitle": "Het geluid is in {format}, dat deze tv of Chromecast niet kan afspelen. Kijk het op je telefoon.",
+ "notVideoTitle": "Je provider stuurde een pagina in plaats van de video",
+ "notVideoSubtitle": "Misschien is je abonnement verlopen of heeft je provider problemen. Controleer of het op je telefoon afspeelt.",
+ "slowTitle": "Dit duurt langer dan normaal…",
+ "slowDetail": "Sommige bestanden hebben even nodig om op deze tv te starten. Het begint vanzelf.",
+ "upNextLabel": "Volgende aflevering",
+ "upNextIn": "Begint over {seconds} s"
 }

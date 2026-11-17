@@ -37,5 +37,15 @@
  "undecodableSubtitle": "Ele é transmitido de uma forma que o player da TV não consegue ler (comum em canais 1080i entrelaçados). Assista no seu celular.",
  "stalledTitle": "A imagem congelou",
  "stalledSubtitle": "Não conseguiu se recuperar sozinha. Pressione “Tentar novamente” ou assista no seu celular.",
- "retry": "Tentar novamente"
+ "retry": "Tentar novamente",
+ "vodCodecTitle": "Esta TV não consegue reproduzir este vídeo",
+ "vodCodecSubtitle": "O formato dele é mais do que esta TV ou este Chromecast consegue suportar. Assista no seu celular.",
+ "vodVideoSubtitle": "A imagem está em {format}, que esta TV ou este Chromecast não consegue decodificar. Assista no seu celular.",
+ "vodAudioSubtitle": "O som está em {format}, que esta TV ou este Chromecast não consegue reproduzir. Assista no seu celular.",
+ "notVideoTitle": "Seu provedor enviou uma página em vez do vídeo",
+ "notVideoSubtitle": "Sua assinatura pode ter terminado, ou seu provedor pode estar com problemas. Confira se ele reproduz no seu celular.",
+ "slowTitle": "Está demorando mais que o normal…",
+ "slowDetail": "Alguns arquivos demoram para começar nesta TV. Ele vai começar sozinho.",
+ "upNextLabel": "Próximo episódio",
+ "upNextIn": "Começa em {seconds} s"
 }

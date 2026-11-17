@@ -37,5 +37,15 @@
  "undecodableSubtitle": "Se lähetetään muodossa, jota TV:n soitin ei pysty lukemaan (yleistä lomitetuilla 1080i-kanavilla). Katso puhelimellasi.",
  "stalledTitle": "Kuva jähmettyi",
  "stalledSubtitle": "Toisto ei palautunut itsestään. Paina ”Yritä uudelleen” tai katso puhelimellasi.",
- "retry": "Yritä uudelleen"
+ "retry": "Yritä uudelleen",
+ "vodCodecTitle": "Tämä TV ei pysty toistamaan tätä videota",
+ "vodCodecSubtitle": "Sen muoto on liikaa tälle TV:lle tai Chromecastille. Katso se puhelimellasi.",
+ "vodVideoSubtitle": "Kuva on muodossa {format}, jota tämä TV tai Chromecast ei pysty purkamaan. Katso se puhelimellasi.",
+ "vodAudioSubtitle": "Ääni on muodossa {format}, jota tämä TV tai Chromecast ei pysty toistamaan. Katso se puhelimellasi.",
+ "notVideoTitle": "Palveluntarjoajasi lähetti sivun videon sijaan",
+ "notVideoSubtitle": "Tilauksesi on ehkä päättynyt, tai palveluntarjoajallasi on ongelmia. Tarkista, toistuuko se puhelimellasi.",
+ "slowTitle": "Kestää tavallista kauemmin…",
+ "slowDetail": "Joidenkin tiedostojen käynnistyminen tällä TV:llä kestää hetken. Se alkaa itsestään.",
+ "upNextLabel": "Seuraava jakso",
+ "upNextIn": "Alkaa {seconds} s kuluttua"
 }

@@ -62,6 +62,22 @@
         }
         #notice.hidden { opacity: 0; }
 
+        /* ━━━━━━ Next episode (over the picture, bottom corner) ━━━━━━ */
+        #upnext {
+            position: absolute; bottom: 48px; inset-inline-end: 48px;
+            max-width: 520px; padding: 16px 22px;
+            background: rgba(0, 0, 0, 0.8); color: #fff;
+            border: 1px solid rgba(255,255,255,0.15); border-radius: 12px;
+            z-index: 160; transition: opacity 0.4s ease; pointer-events: none;
+        }
+        #upnext.hidden { opacity: 0; }
+        #upnext-label {
+            color: rgba(255,255,255,0.6); font-size: 14px;
+            letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px;
+        }
+        #upnext-title { font-size: 22px; font-weight: 600; line-height: 1.3; }
+        #upnext-count { color: rgba(255,255,255,0.75); font-size: 16px; margin-top: 8px; }
+
         /* ━━━━━━ Ready (idle, connected, no media yet) overlay ━━━━━━ */
         #ready-icon {
             width: 96px; height: 96px;
@@ -206,6 +222,11 @@
         <div id="error-code"></div>
     </div>
     <div id="notice" class="hidden"></div>
+    <div id="upnext" class="hidden">
+        <div id="upnext-label"></div>
+        <div id="upnext-title"></div>
+        <div id="upnext-count"></div>
+    </div>
     <div id="staging-badge" class="hidden">STAGING</div>
     <div id="debug" class="hidden">
         <div id="debug-head">debug</div>
@@ -272,6 +293,16 @@
                 undecodableSubtitle: "It's broadcast in a form the TV's player can't read (common with interlaced 1080i channels). Watch it on your phone.",
                 stalledTitle: "The picture froze",
                 stalledSubtitle: "It couldn't recover on its own. Press Retry, or watch it on your phone.",
+                vodCodecTitle: "This TV can't play this video",
+                vodCodecSubtitle: "Its format is more than this TV or Chromecast can handle. Watch it on your phone.",
+                vodVideoSubtitle: "Its picture is in {format}, which this TV or Chromecast can't decode. Watch it on your phone.",
+                vodAudioSubtitle: "Its sound is in {format}, which this TV or Chromecast can't play. Watch it on your phone.",
+                notVideoTitle: "Your provider sent a page instead of the video",
+                notVideoSubtitle: "Your subscription may have ended, or your provider may be having problems. Check that it plays on your phone.",
+                slowTitle: "Taking longer than usual…",
+                slowDetail: "Some files take a while to start on this TV. It will start on its own.",
+                upNextLabel: "Next episode",
+                upNextIn: "Starts in {seconds} s",
                 retry: "Retry",
             },
         }, (typeof window !== 'undefined' && window.NIPA_STRINGS) || {});
@@ -405,6 +436,7 @@
         // every status so the app can tell this channel's news from the
         // previous one's.
         let nipaLoadId = null;
+        let lastCustom = {};
 
         function readSenderHandshake(request) {
             const custom = (request && request.customData) || {};
@@ -420,6 +452,7 @@
             // previous sender, and isn't kept for the next launch).
             const nipa = (custom.nipa && typeof custom.nipa === 'object') ? custom.nipa : {};
             nipaLoadId = typeof nipa.loadId === 'string' ? nipa.loadId : null;
+            lastCustom = custom;
             const appLocale = nipa.locale || custom.locale;
             applyLang(appLocale || navigator.language, !!appLocale);
             const on = Object.keys(activeFeatures).filter(feature).join(',') || '-';
@@ -559,17 +592,20 @@
         //   'stalled'     → the picture froze, never started, or the decoder
         //                   failed, and rebuilding didn't help
         //   'network'     → the provider can't be reached (no HTTP answer)
+        //   'vodCodec'    → a movie or episode in a format this device can't
+        //                   play ([subtitle] names the picture or the sound)
+        //   'notVideo'    → the provider answered with a page, not a video
         const ERROR_KINDS = [
             'codec', 'connLimit', 'rateLimit', 'auth', 'notFound',
             'tsOnly', 'serverError', 'playerLoad', 'undecodable', 'stalled',
-            'network',
+            'network', 'vodCodec', 'notVideo',
         ];
 
-        function showError({ codeLine, kind, detail, status }) {
+        function showError({ codeLine, kind, detail, status, subtitle }) {
             const key = ERROR_KINDS.includes(kind) ? kind : 'error';
             const fill = (s) => s.replace('{status}', status || '?');
             errorTitle.textContent = t(`${key}Title`);
-            errorSubtitle.textContent = fill(t(`${key}Subtitle`)) + (detail ? ` ${detail}` : '');
+            errorSubtitle.textContent = (subtitle || fill(t(`${key}Subtitle`))) + (detail ? ` ${detail}` : '');
             errorRetry.textContent = t('retry');
             errorCode.textContent = codeLine || '';
             hideLoading();
@@ -660,8 +696,16 @@
         //        reconnecting | failed | ended
         // Never a URL. Older apps don't listen on the namespace: for them
         // nothing changes.
+        //
+        // Since 2026-11-17 (the hello's `features`):
+        //   vodCauses: a movie or episode that fails says why, like a channel
+        //              (`failure.format` names what the device can't play);
+        //   queue:     app → TV {type:'queue', forLoadId, items, autoAdvance}
+        //              plays the next episodes on the TV by itself, also while
+        //              the phone sleeps (see "Episode queue").
         const NIPA_NS = 'urn:x-cast:com.nipaplayer.cast';
-        const RX_VERSION = '2026-10-29.1';
+        const RX_VERSION = '2026-11-17.1';
+        const RX_FEATURES = { vodCauses: 1, queue: 1 };
         let statusSeq = 0;
         let capsCache = null;
 
@@ -686,8 +730,26 @@
                 eac3: mse('audio/mp4; codecs="ec-3"'),
                 // What hls.js reads out of MPEG-TS, whatever the device.
                 tsVideo: ['h264'],
+                // AAC with more than two channels: no type check tells, so
+                // it's what this device showed with a file (null: not yet).
+                aacMulti: typeof learned().aacMulti === 'boolean' ? learned().aacMulti : null,
             };
             return capsCache;
+        }
+
+        // What this device turned out to play or not, kept between launches.
+        const LEARNED_KEY = 'nipa.caps.learned';
+        function learned() {
+            try { return JSON.parse(localStorage.getItem(LEARNED_KEY) || '{}') || {}; } catch (_) { return {}; }
+        }
+        function learn(key, value) {
+            try {
+                const l = learned();
+                if (l[key] === value) return;
+                l[key] = value;
+                localStorage.setItem(LEARNED_KEY, JSON.stringify(l));
+                capsCache = null;
+            } catch (_) { /* storage off: asked again next time */ }
         }
 
         function sendToApps(msg, senderId) {
@@ -701,6 +763,10 @@
         // What the app is told about session [s]; `extra` adds wait/failure.
         function statusOf(s, extra) {
             const live = s ? s.isLive : false;
+            const q = s && s.queue;
+            const queue = q ? { left: q.items.length, auto: q.autoAdvance, cancelled: q.cancelled } : undefined;
+            const upNext = (q && q.shownLeft > 0 && q.items.length)
+                ? { loadId: q.items[0].loadId, inSec: q.shownLeft, total: q.countdownSec } : undefined;
             return Object.assign({
                 type: 'status', v: 1,
                 loadId: s ? s.loadId : null,
@@ -716,6 +782,10 @@
                         : (s.videoCodec ? { codec: s.videoCodec } : null),
                     audioOnly: !!s.audioOnly,
                 } : null,
+                // A file still not open after a while (it will start on its own).
+                slow: (s && s.slow) || undefined,
+                queue,
+                upNext,
             }, extra || {});
         }
 
@@ -730,18 +800,25 @@
 
         context.addCustomMessageListener(NIPA_NS, (event) => {
             const data = event && event.data;
+            if (data && data.type === 'queue') { onQueueMessage(data); return; }
             if (!data || data.type !== 'hello') return;
             dbg('nipa', `hello from ${data.app || '?'} ${data.version || '?'} (${data.platform || '?'})`);
             if (data.locale) applyLang(data.locale, true);
-            sendToApps({ type: 'hello', v: 1, rx: RX_VERSION, caps: probeCaps() }, event.senderId);
-            // An app that (re)joins mid-channel learns where things stand.
+            sendToApps({ type: 'hello', v: 1, rx: RX_VERSION, caps: probeCaps(), features: RX_FEATURES }, event.senderId);
+            // An app that (re)joins mid-channel learns where things stand,
+            // and which queued episodes the TV played while it was away.
             if (session) sendToApps(statusOf(session, session.lastExtra), event.senderId);
+            if (queueHistory.length || (session && session.queue)) sendToApps(queueState(), event.senderId);
         });
 
-        function cleanup() {
+        // [keepElement]: CAF has already given the element its new source
+        // (a LOAD the receiver made, routed by hand).
+        function cleanup(keepElement) {
             endSession();
             hideNotice();
+            hideUpNext();
             if (hls) { hls.destroy(); hls = null; }
+            if (keepElement) return;
             video.removeAttribute('src');
             video.load();
         }
@@ -795,6 +872,7 @@
         let session = null;
 
         function newSession({ url, contentType, startTime, isLive }) {
+            const prev = session;
             endSession();
             const s = {
                 url, contentType, startTime, isLive,
@@ -824,7 +902,26 @@
                 lastProgressAt: Date.now(),
                 lastProgressPos: 0,
                 timers: new Set(),
+                // The LOAD's customData (what a queued episode's LOAD copies).
+                custom: lastCustom,
+                // Native engine: each (re)load of the file is an attempt.
+                attempt: 0,
+                metadataAt: 0,
+                classifying: false,   // reading the file to name a failure
+                blindRetries: 0,      // reloads when the provider can't be asked
+                slow: false,          // still not open after NATIVE_SLOW_MS
+                audioChecked: false,
+                audioContent: false,  // a file with sound and no picture, on purpose
+                // The episodes that follow, played by the TV itself.
+                queue: null,
             };
+            if (carriedQueue && carriedQueue.forLoadId === s.loadId) {
+                s.queue = Object.assign({}, carriedQueue, { cancelled: false, anchor: -1, shownLeft: 0 });
+            } else if (prev && prev.queue && prev.loadId && prev.loadId === s.loadId) {
+                // The same LOAD again (Retry on the TV): its queue stays.
+                s.queue = prev.queue;
+            }
+            carriedQueue = null;
             session = s;
             return s;
         }
@@ -888,17 +985,20 @@
         // sender then reports the failure instead of "casting").
         // [reason] is what the status channel reports when the screen's
         // [kind] doesn't say it (frozen, never started, network…).
-        function failSession(s, { kind, codeLine, detail, status, reason } = {}) {
+        function failSession(s, { kind, codeLine, detail, status, reason, subtitle, format } = {}) {
             if (session !== s || s.failed) return;
             s.failed = true;
             s.timers.forEach(clearTimeout);
             s.timers.clear();
             dropHls();
+            hideUpNext();
             dbg('fail', `${kind || 'generic'} · ${codeLine || '-'}`, 'err');
-            showError({ kind: kind || reason, codeLine, detail, status });
+            showError({ kind: kind || reason, codeLine, detail, status, subtitle });
             const failure = { kind: reason || kind || 'network' };
             if (status) failure.http = status;
             if (kind === 'codec' && s.codecMime) failure.detail = s.codecMime;
+            // What in the file this device can't play: { part, name }.
+            if (format) failure.format = format;
             setState(s, 'failed', { failure });
             settleLoadForFailure(s);
         }
@@ -981,108 +1081,944 @@
         //     the src itself, single-pass. The sender shows "casting" a
         //     couple of seconds before the picture appears — the
         //     trade-off for never restarting mid-load.
+        // LOADs the receiver makes itself: the same file again (a provider
+        // wait, a reload after a break) and the next queued episode. Whether
+        // CAF passes a LOAD made by the page through this interceptor isn't
+        // documented, so both ways are handled: a reload needs no routing, and
+        // a queued episode CAF loaded on its own is followed by hand.
+        let pendingReload = null;     // token of the reload on its way
+        let pendingQueued = null;     // load id of the queued episode on its way
+        let lastRequest = null;       // the last LOAD, for the TV's own Retry
+
         playerManager.setMessageInterceptor(
             cast.framework.messages.MessageType.LOAD,
-            (request) => {
-                const url = request.media.contentUrl || request.media.contentId;
-                const contentType = (request.media.contentType || '').toLowerCase();
-                const startTime = request.currentTime || 0;
-                const isLive = request.media.streamType === cast.framework.messages.StreamType.LIVE;
-
-                cleanup();
-                hideError();
-                // The sender's language before anything is drawn.
-                readSenderHandshake(request);
-                showLoading(t('loading'));
-                // Reset the debug log so it shows only the current attempt.
-                dbgRows.length = 0;
-                renderDebug();
-
-                if (!url) {
-                    dbg('LOAD', 'request had no URL', 'err');
-                    return request;
-                }
-
-                const sum = urlSummary(url);
-                dbg('LOAD', `${sum.host} ${sum.ext} ct=${contentType || '-'} t=${startTime}s${isLive ? ' live' : ''}`);
-                lastKnownTime = 0;
-                armStartTimeGuard(startTime);
-
-                lastLoad = { url, startTime, contentType, isLive };
-
-                const isHls = url.includes('.m3u8') || contentType.includes('mpegurl');
-                const liveTs = !isHls && isLiveTs(url, isLive);
-
-                if (isHls || liveTs) {
-                    if (!window.Hls) {
-                        // Neither the vendored copy nor the CDN fallback loaded.
-                        const s = newSession({ url, contentType, startTime, isLive });
-                        failSession(s, { kind: 'playerLoad', codeLine: 'HLS.JS NOT LOADED' });
-                        // As settleLoadForFailure(): only senders that handle
-                        // a failed LOAD get one. An HLS request resolved with
-                        // skipPlayersLoad leaves the element (and the error
-                        // screen) alone.
-                        return (feature('loadFailure') && !feature('nipaStatus')) ? loadFailedError() : request;
-                    }
-                    if (Hls.isSupported()) {
-                        return loadWithHlsJs(request, { url, contentType, startTime, isLive, liveTs });
-                    }
-                }
-                if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
-                    dbg('engine', 'native HLS', 'ok');
-                } else {
-                    dbg('engine', `native (${sum.ext})`, 'ok');
-                }
-                const ns = newSession({ url, contentType, startTime, isLive });
-                ns.engine = 'native';
-                ns.via = 'native';
-                setState(ns, 'starting');
-                return loadWithCafNative(request);
-            }
+            (request) => handleLoad(request)
         );
 
-        // ━━━━━━ Native engine ━━━━━━
-        //
-        // CAF assigns video.src itself once we resolve. We only attach
-        // listeners for diagnostics and to surface MediaErrors with the
-        // codec/network split. The promise resolves right away — there's
-        // nothing for us to "wait for" since CAF owns the load.
-        function loadWithCafNative(request) {
-            // Track whether the container parsed (loadedmetadata) before
-            // any error — used to label MediaError code 3/4 as a codec
-            // problem rather than a network one.
-            let metadataSeen = false;
-            const onMeta = () => {
-                metadataSeen = true;
-                video.removeEventListener('loadedmetadata', onMeta);
-            };
-            const onError = () => {
-                video.removeEventListener('error', onError);
-                video.removeEventListener('loadedmetadata', onMeta);
-                const code = video.error ? video.error.code : 0;
-                const map = {
-                    1: 'ABORTED', 2: 'NETWORK', 3: 'DECODE', 4: 'SRC_NOT_SUPPORTED',
-                };
-                const kind = map[code] || 'UNKNOWN';
-                const msg = video.error && video.error.message
-                    ? ` "${video.error.message}"` : '';
-                dbg('native', `MediaError code=${code} ${kind}${msg}`, 'err');
-                const isCodecError = metadataSeen && (code === 3 || code === 4);
-                showError({
-                    codeLine: `MEDIA_ERROR · ${kind}`,
-                    kind: isCodecError ? 'codec' : undefined,
-                });
-                const s = session;
-                if (s && !s.failed) {
-                    s.failed = true;
-                    setState(s, 'failed', { failure: { kind: isCodecError ? 'codec' : 'media' } });
+        // [byHand]: CAF has already given the element [request]'s file.
+        function handleLoad(request, byHand) {
+            const custom = request.customData || {};
+            if (custom.nipaInternal && custom.nipaInternal === pendingReload) {
+                // The same file for the session that asked: nothing to route.
+                pendingReload = null;
+                dbg('LOAD', 'the same file again', 'ok');
+                return Promise.resolve(request);
+            }
+            const url = request.media.contentUrl || request.media.contentId;
+            const contentType = (request.media.contentType || '').toLowerCase();
+            const startTime = request.currentTime || 0;
+            const isLive = request.media.streamType === cast.framework.messages.StreamType.LIVE;
+            const isHls = !!url && (url.includes('.m3u8') || contentType.includes('mpegurl'));
+            const liveTs = !!url && !isHls && isLiveTs(url, isLive);
+            const viaHls = (isHls || liveTs) && !!window.Hls && Hls.isSupported();
+
+            cleanup(byHand && !viaHls);
+            hideError();
+            // The sender's language before anything is drawn.
+            readSenderHandshake(request);
+            if (pendingQueued && nipaLoadId === pendingQueued) pendingQueued = null;
+            showLoading(t('loading'));
+            // Reset the debug log so it shows only the current attempt.
+            dbgRows.length = 0;
+            renderDebug();
+
+            if (!url) {
+                dbg('LOAD', 'request had no URL', 'err');
+                return request;
+            }
+
+            const sum = urlSummary(url);
+            dbg('LOAD', `${sum.host} ${sum.ext} ct=${contentType || '-'} t=${startTime}s${isLive ? ' live' : ''}`);
+            lastKnownTime = 0;
+            armStartTimeGuard(startTime);
+
+            lastLoad = { url, startTime, contentType, isLive };
+            lastRequest = request;
+
+            if (isHls || liveTs) {
+                if (!window.Hls) {
+                    // Neither the vendored copy nor the CDN fallback loaded.
+                    const s = newSession({ url, contentType, startTime, isLive });
+                    failSession(s, { kind: 'playerLoad', codeLine: 'HLS.JS NOT LOADED' });
+                    // As settleLoadForFailure(): only senders that handle
+                    // a failed LOAD get one. An HLS request resolved with
+                    // skipPlayersLoad leaves the element (and the error
+                    // screen) alone.
+                    return (feature('loadFailure') && !feature('nipaStatus')) ? loadFailedError() : request;
                 }
-            };
-            video.addEventListener('loadedmetadata', onMeta, { once: true });
-            video.addEventListener('error', onError);
-            // Resolve immediately — CAF takes it from here.
-            dbg('LOAD', 'native: resolving CAF (CAF will load src)', 'ok');
+                if (Hls.isSupported()) {
+                    return loadWithHlsJs(request, { url, contentType, startTime, isLive, liveTs });
+                }
+            }
+            if (isHls && video.canPlayType('application/vnd.apple.mpegurl')) {
+                dbg('engine', 'native HLS', 'ok');
+            } else {
+                dbg('engine', `native (${sum.ext})`, 'ok');
+            }
+            const ns = newSession({ url, contentType, startTime, isLive });
+            ns.via = 'native';
+            ns.request = request;
+            startNativeAttempt(ns);
+            setState(ns, 'starting');
+            // Resolved at once: CAF gives the element the file itself.
+            dbg('LOAD', 'native: CAF loads the file', 'ok');
             return Promise.resolve(request);
+        }
+
+        // ━━━━━━ Native engine (movies and episodes) ━━━━━━
+        //
+        // CAF gives the <video> the file once the LOAD resolves. All the TV's
+        // player says when it can't is MediaError 4, whatever the reason, so:
+        //   * a failure is named by reading the file once the element has let
+        //     go of it (see "What a file holds"): the provider's answer (a
+        //     busy account, refused, gone, a page instead of a video), else
+        //     the format this device can't play;
+        //   * a provider still holding the account's connection is waited out,
+        //     as on the channel path (status-channel apps);
+        //   * a file that plays sound over black (HEVC, Xvid…) is stopped and
+        //     named after a few seconds, unless it has no picture at all;
+        //   * a file slow to open says so, and fails after NATIVE_NO_START_MS.
+        // Reloads go back through CAF (playerManager.load) so the app keeps
+        // control of the new media session. Only apps on the status channel
+        // get them: older ones follow their own LOAD only, and get the named
+        // failure instead.
+        const NATIVE_SLOW_MS = 12000;
+        const NATIVE_NO_START_MS = 120000;
+        const PICTURE_CHECK_MS = 3000;
+        const NATIVE_BLIND_RETRIES = 3;
+        const canReload = () => feature('nipaStatus');
+        const isNative = (s) => !!s && s.engine === 'native' && s.via !== 'ts-native';
+
+        // A (re)load of the file begins.
+        function startNativeAttempt(s) {
+            s.engine = 'native';
+            s.attempt += 1;
+            s.metadataAt = 0;
+            s.classifying = false;
+            s.audioChecked = false;
+            s.slow = false;
+            s.attemptStartedAt = Date.now();
+            const attempt = s.attempt;
+            const opening = () => session === s && s.attempt === attempt && !s.metadataAt &&
+                !s.failed && !s.classifying && s.state !== 'waitingSlot';
+            later(s, NATIVE_SLOW_MS, () => {
+                if (!opening()) return;
+                s.slow = true;
+                dbg('native', `not open after ${NATIVE_SLOW_MS / 1000}s`, 'warn');
+                showLoading(t('slowTitle'), t('slowDetail'));
+                setState(s, s.state, s.lastExtra);
+            });
+            later(s, NATIVE_NO_START_MS, () => {
+                if (opening()) classifyNative(s, 'noStart');
+            });
+        }
+
+        video.addEventListener('loadedmetadata', () => {
+            const s = session;
+            if (!isNative(s) || s.classifying) return;
+            s.metadataAt = Date.now();
+            if (s.slow) {
+                s.slow = false;
+                showLoading(t('buffering'));
+            }
+            if (s.slotWaitStartedAt) {
+                dbg('slot', `provider accepted after ${Math.round((Date.now() - s.slotWaitStartedAt) / 1000)}s`, 'ok');
+                s.slotWaitStartedAt = 0;
+                s.slotRetries = 0;
+            }
+            if (['starting', 'waitingSlot', 'reconnecting'].includes(s.state)) setState(s, 'buffering');
+        });
+
+        video.addEventListener('error', () => {
+            const s = session;
+            if (!isNative(s) || s.failed || s.classifying) return;
+            classifyNative(s, 'error');
+        });
+
+        video.addEventListener('playing', () => {
+            const s = session;
+            if (!isNative(s) || s.audioChecked || s.audioContent) return;
+            const attempt = s.attempt;
+            later(s, PICTURE_CHECK_MS, () => checkPicture(s, attempt));
+        });
+
+        // Sound with no picture after a few seconds of playing.
+        function checkPicture(s, attempt) {
+            if (session !== s || s.attempt !== attempt || s.failed || s.classifying || s.audioChecked) return;
+            // Not really playing yet: the next `playing` checks again.
+            if (video.paused || !(video.currentTime > 0)) return;
+            s.audioChecked = true;
+            if (video.videoWidth > 0 || video.webkitDecodedFrameCount > 0) return;
+            dbg('native', 'sound with no picture', 'warn');
+            if (!canReload()) {
+                // Older apps: said over the sound, as on the channel path.
+                showNotice(t('audioOnly'));
+                s.audioOnly = true;
+                setState(s, s.state, s.lastExtra);
+                return;
+            }
+            classifyNative(s, 'audioOnly');
+        }
+
+        function stopNative() {
+            try { video.pause(); } catch (_) { /* nothing loaded */ }
+            video.removeAttribute('src');
+            video.load();
+        }
+
+        // Why the file didn't play, from what the provider sends for it.
+        // [why]: 'error' (MediaError), 'audioOnly' (no picture), 'noStart'.
+        async function classifyNative(s, why) {
+            if (session !== s || s.failed || s.classifying) return;
+            s.classifying = true;
+            s.slow = false;
+            const attempt = s.attempt;
+            const err = video.error;
+            const code = err ? err.code : 0;
+            const msg = (err && err.message) || '';
+            const afterMetadata = !!s.metadataAt;
+            const at = s.hasPlayed ? Math.floor(lastKnownTime) : s.startTime;
+            dbg('native', `${why}${code ? ` · MediaError ${code}` : ''}${msg ? ` "${msg}"` : ''} → reading the file`, 'warn');
+            // The element lets go of the connection first: with a one-connection
+            // account the read would be refused, or cut the picture.
+            stopNative();
+            const head = await probeHead(s.url);
+            if (session !== s || s.attempt !== attempt || s.failed) return;
+            s.classifying = false;
+            const status = head.status;
+            const m = (head.media && !head.media.unknown) ? head.media : null;
+            dbg('head', `HTTP ${status || '-'} · ${m ? describeMedia(m) : (head.error || (head.media && head.media.indexAtEnd ? 'mp4, index at the end' : 'format not read'))}`);
+            const codeLine = (extra) => [code ? `MEDIA_ERROR ${code}` : why.toUpperCase(), extra].filter(Boolean).join(' · ');
+
+            if (CONN_REFUSED_STATUSES.includes(status)) {
+                if (canReload()) { waitForSlotNative(s, status, at); return; }
+                failSession(s, { kind: status === 429 ? 'rateLimit' : 'connLimit', codeLine: `PROVIDER REFUSED · HTTP ${status}`, status });
+                return;
+            }
+            const kind = httpKind(status);
+            if (kind) {
+                failSession(s, { kind, codeLine: codeLine(`HTTP ${status}`), status });
+                return;
+            }
+            if (status >= 200 && status < 300) {
+                if (head.html) {
+                    failSession(s, { kind: 'notVideo', codeLine: codeLine(`HTTP ${status} · NOT A VIDEO`) });
+                    return;
+                }
+                if (why === 'audioOnly' && m && !m.video) {
+                    // Sound only on purpose: carry on where it was.
+                    s.audioContent = true;
+                    reloadNative(s, at);
+                    return;
+                }
+                const problem = m ? formatProblem(m, { soundPlayed: why === 'audioOnly' }) : null;
+                if (problem || why === 'audioOnly') {
+                    // No picture with nothing named is still about the picture.
+                    const p = problem || (m && m.video ? { part: 'video', name: videoName(m.video), codec: m.video.codec } : null);
+                    if (p && p.part === 'audio' && p.codec === 'aac') learn('aacMulti', false);
+                    failSession(s, {
+                        kind: 'vodCodec',
+                        reason: 'codec',
+                        format: p ? { part: p.part, name: p.name } : undefined,
+                        subtitle: p ? t(p.part === 'video' ? 'vodVideoSubtitle' : 'vodAudioSubtitle').replace('{format}', p.name) : undefined,
+                        codeLine: codeLine(p ? `${p.part.toUpperCase()} ${p.name}` : 'NO PICTURE'),
+                    });
+                    return;
+                }
+                // Reachable, and nothing in it known to be a problem.
+                if (s.hasPlayed && canReload() && rebuildNative(s, at, `${why} after playing`)) return;
+                if (why === 'noStart') {
+                    failSession(s, { kind: 'stalled', reason: 'noPlayback', codeLine: 'NO PLAYBACK' });
+                    return;
+                }
+                if (afterMetadata || code === 3 || code === 4) {
+                    failSession(s, { kind: 'vodCodec', reason: 'codec', codeLine: codeLine(m ? describeMedia(m) : '') });
+                    return;
+                }
+                failSession(s, { codeLine: codeLine(), reason: 'media' });
+                return;
+            }
+            // The provider couldn't be asked (no CORS headers, network down).
+            // Before the file opened, that's often the account still held
+            // for a moment: a few plain reloads first.
+            if (!afterMetadata && !s.hasPlayed && canReload() && s.blindRetries < NATIVE_BLIND_RETRIES) {
+                s.blindRetries += 1;
+                dbg('native', `provider not readable (${head.error || status}) → reload #${s.blindRetries}`, 'warn');
+                showLoading(t('retrying'));
+                later(s, 4000 * s.blindRetries, () => reloadNative(s, at));
+                return;
+            }
+            if (s.hasPlayed && canReload() && rebuildNative(s, at, `${why} after playing`)) return;
+            failSession(s, {
+                kind: afterMetadata ? 'vodCodec' : undefined,
+                reason: afterMetadata ? 'codec' : 'media',
+                codeLine: codeLine(head.error ? String(head.error).toUpperCase() : ''),
+            });
+        }
+
+        // The provider refuses the TV a connection: ask again now and then
+        // (only the headers, cut at once) and reload the file once it agrees.
+        function waitForSlotNative(s, status, at) {
+            const now = Date.now();
+            if (!s.slotWaitStartedAt) {
+                s.slotWaitStartedAt = now;
+                dbg('slot', `HTTP ${status} → waiting for the provider to free the connection`, 'warn');
+            }
+            if (now - s.slotWaitStartedAt >= SLOT_WAIT_MS) {
+                failSession(s, {
+                    kind: status === 429 ? 'rateLimit' : 'connLimit',
+                    codeLine: `PROVIDER REFUSED · HTTP ${status}`,
+                    status,
+                });
+                return;
+            }
+            showLoading(t('waitingProviderTitle'), t('waitingProviderDetail'));
+            s.slotStatus = status;
+            setState(s, 'waitingSlot', { wait: slotWait(s) });
+            const delay = SLOT_RETRY_DELAYS_MS[Math.min(s.slotRetries, SLOT_RETRY_DELAYS_MS.length - 1)];
+            s.slotRetries += 1;
+            later(s, delay, async () => {
+                const waited = Math.round((Date.now() - s.slotWaitStartedAt) / 1000);
+                const head = await probeHead(s.url, { statusOnly: true });
+                if (session !== s || s.failed) return;
+                dbg('slot', `retry #${s.slotRetries} after ${waited}s: HTTP ${head.status || '-'}`);
+                if (CONN_REFUSED_STATUSES.includes(head.status)) {
+                    waitForSlotNative(s, head.status, at);
+                    return;
+                }
+                // Free (or another answer, which the reload's own failure names).
+                reloadNative(s, at);
+            });
+        }
+
+        // It played, then broke (network, the provider closing it): reload
+        // where it was, a few times per window.
+        function rebuildNative(s, at, reason) {
+            const now = Date.now();
+            s.rebuilds = s.rebuilds.filter((x) => now - x < REBUILD_WINDOW_MS);
+            if (s.rebuilds.length >= MAX_REBUILDS) return false;
+            s.rebuilds.push(now);
+            s.totalRebuilds += 1;
+            dbg('recover', `${reason} → reloading at ${at}s (#${s.rebuilds.length})`, 'warn');
+            showLoading(t('reconnecting'));
+            setState(s, 'reconnecting');
+            later(s, 1000, () => reloadNative(s, at));
+            return true;
+        }
+
+        // The same file again, through CAF, from [at] seconds.
+        function reloadNative(s, at) {
+            if (session !== s || s.failed) return;
+            startNativeAttempt(s);
+            const M = cast.framework.messages;
+            const req = new M.LoadRequestData();
+            req.media = s.request.media;
+            req.autoplay = true;
+            req.currentTime = at > 0 ? at : 0;
+            pendingReload = `r${s.attempt}.${Date.now()}`;
+            req.customData = Object.assign({}, s.request.customData || {}, { nipaInternal: pendingReload });
+            armStartTimeGuard(req.currentTime);
+            dbg('native', `reload at ${req.currentTime}s`);
+            try {
+                const p = playerManager.load(req);
+                if (p && p.catch) p.catch((e) => dbg('native', `reload: ${(e && e.message) || e}`, 'warn'));
+            } catch (e) {
+                dbg('native', `reload threw: ${(e && e.message) || e}`, 'err');
+            }
+        }
+
+        // ━━━━━━ What a file holds (on-demand failures) ━━━━━━
+        //
+        // When the TV's own player can't play a movie or an episode it only
+        // says MEDIA_ERR_SRC_NOT_SUPPORTED, whatever the reason: the provider
+        // refusing a second connection (HTTP 458), a picture this device can't
+        // decode (HEVC, Xvid), a sound it can't (AAC 5.1 on a 2nd-gen
+        // Chromecast)... Once the element has let go of the connection, the
+        // receiver reads the start of the file itself and names the cause.
+        //
+        // A plain GET, cut once the header is in: providers' CORS preflight
+        // refuses a Range header on these Chromecasts (Chrome 90), so the
+        // read always starts at byte 0. MP4 is only understood when its index
+        // (moov) is at the start.
+        const HEAD_BYTES = 262144;          // Matroska, AVI, TS: tracks come first
+        const HEAD_BYTES_MP4 = 2097152;     // MP4: a long movie's index is bigger
+        const HEAD_TIMEOUT_MS = 10000;
+
+        // → { status, html?, media? } or { status: 0, error } when the provider
+        // can't be asked (no CORS headers, network). [statusOnly]: the answer
+        // alone, cut as soon as it comes (asking a busy provider again).
+        async function probeHead(url, { statusOnly } = {}) {
+            const ac = (typeof AbortController === 'function') ? new AbortController() : null;
+            const timer = setTimeout(() => { if (ac) ac.abort(); }, HEAD_TIMEOUT_MS);
+            try {
+                const r = await fetch(url, ac ? { signal: ac.signal } : {});
+                if (!r.ok || statusOnly) return { status: r.status };
+                if (!r.body || !r.body.getReader) return { status: r.status };
+                const reader = r.body.getReader();
+                const parts = [];
+                let n = 0;
+                let want = HEAD_BYTES;
+                for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    parts.push(value);
+                    n += value.length;
+                    if (n >= 8 && want === HEAD_BYTES && isMp4Start(parts[0])) want = HEAD_BYTES_MP4;
+                    if (n >= want) break;
+                    if (want === HEAD_BYTES_MP4 && n >= 65536 && mp4IndexDone(joinBytes(parts, n))) break;
+                }
+                try { reader.cancel(); } catch (_) { /* gone */ }
+                const bytes = joinBytes(parts, n);
+                return { status: r.status, html: looksLikeHtml(bytes), media: parseMediaHead(bytes) };
+            } catch (e) {
+                return { status: 0, error: String((e && e.name) || e) };
+            } finally {
+                clearTimeout(timer);
+                if (ac) { try { ac.abort(); } catch (_) { /* done */ } }
+            }
+        }
+
+        function joinBytes(parts, n) {
+            const out = new Uint8Array(n);
+            let o = 0;
+            for (const p of parts) { out.set(p.subarray(0, Math.min(p.length, n - o)), o); o += p.length; if (o >= n) break; }
+            return out;
+        }
+        const ascii = (b, at, len) => {
+            let out = '';
+            const end = Math.min(b.length, at + len);
+            for (let i = at; i < end; i++) out += String.fromCharCode(b[i]);
+            return out;
+        };
+        const u32 = (b, at) => ((b[at] << 24) >>> 0) + (b[at + 1] << 16) + (b[at + 2] << 8) + b[at + 3];
+        const u16 = (b, at) => (b[at] << 8) + b[at + 1];
+        const isMp4Start = (b) => b.length >= 8 && ['ftyp', 'moov', 'free', 'skip', 'mdat', 'wide'].includes(ascii(b, 4, 4));
+        function looksLikeHtml(b) {
+            const head = ascii(b, 0, Math.min(b.length, 256)).trim().toLowerCase();
+            return head.startsWith('<!doctype') || head.startsWith('<html') || head.startsWith('<?xml') || head.startsWith('{');
+        }
+
+        // ── Matroska / WebM ──
+        function ebmlVint(b, p, keepMarker) {
+            const first = b[p];
+            if (first === undefined) return null;
+            let len = 1, mask = 0x80;
+            while (len <= 8 && !(first & mask)) { len++; mask >>= 1; }
+            if (len > 8 || p + len > b.length) return null;
+            let v = keepMarker ? first : (first & (mask - 1));
+            for (let i = 1; i < len; i++) v = v * 256 + b[p + i];
+            return { v, len };
+        }
+        function parseMatroska(b) {
+            const tracks = [];
+            let cur = null;
+            const CONTAINERS = new Set([0x1654AE6B, 0xE0, 0xE1]);   // Tracks, Video, Audio
+            const walk = (p, end) => {
+                while (p < end && p < b.length - 2) {
+                    const id = ebmlVint(b, p, true); if (!id) return true;
+                    const size = ebmlVint(b, p + id.len, false); if (!size) return true;
+                    const body = p + id.len + size.len;
+                    const bodyEnd = Math.min(body + size.v, b.length);
+                    if (id.v === 0x1F43B675) return true;              // first Cluster: tracks are behind us
+                    if (id.v === 0x18538067) return walk(body, b.length); // Segment (size may be unknown)
+                    if (CONTAINERS.has(id.v)) { if (walk(body, bodyEnd)) return true; }
+                    else if (id.v === 0xAE) { cur = {}; tracks.push(cur); walk(body, bodyEnd); }
+                    else if (cur) {
+                        const raw = b.subarray(body, bodyEnd);
+                        const uint = () => { let x = 0; for (const c of raw) x = x * 256 + c; return x; };
+                        if (id.v === 0x83) cur.type = uint();
+                        else if (id.v === 0x86) cur.codec = ascii(raw, 0, raw.length);
+                        else if (id.v === 0x63A2) cur.priv = raw;
+                        else if (id.v === 0x9F) cur.channels = uint();
+                        else if (id.v === 0xB0) cur.w = uint();
+                        else if (id.v === 0xBA) cur.h = uint();
+                        else if (id.v === 0x6264) cur.bits = uint();
+                        else if (id.v === 0x88) cur.isDefault = uint() === 1;
+                        else if (id.v === 0x22B59C) cur.lang = ascii(raw, 0, raw.length);
+                    }
+                    p = body + size.v;
+                }
+                return false;
+            };
+            walk(0, b.length);
+            const out = { container: 'mkv', video: null, audio: [], text: 0 };
+            for (const t of tracks) {
+                const c = t.codec || '';
+                if (t.type === 1 && !out.video) {
+                    const v = { codec: 'other', id: c, w: t.w || 0, h: t.h || 0 };
+                    if (c === 'V_MPEG4/ISO/AVC') Object.assign(v, avcConfig(t.priv), { codec: 'h264' });
+                    else if (c === 'V_MPEGH/ISO/HEVC') Object.assign(v, hevcConfig(t.priv), { codec: 'hevc' });
+                    else if (/^V_MPEG4\/(ISO\/(ASP|SP|AP)|MS\/V3)/.test(c)) v.codec = 'mpeg4';
+                    else if (/^V_MPEG(1|2)$/.test(c)) v.codec = 'mpeg2';
+                    else if (c === 'V_VP9') v.codec = 'vp9';
+                    else if (c === 'V_VP8') v.codec = 'vp8';
+                    else if (c === 'V_AV1') v.codec = 'av1';
+                    else if (c === 'V_MS/VFW/FOURCC') v.codec = vfwCodec(t.priv);
+                    if (t.bits && !v.bits) v.bits = t.bits;
+                    out.video = v;
+                } else if (t.type === 2) {
+                    const a = { codec: 'other', id: c, channels: t.channels || 0, lang: t.lang || null, isDefault: t.isDefault !== false };
+                    if (c === 'A_AAC' || /^A_AAC\//.test(c)) Object.assign(a, { codec: 'aac' }, aacConfig(t.priv));
+                    else if (c === 'A_AC3') a.codec = 'ac3';
+                    else if (c === 'A_EAC3') a.codec = 'eac3';
+                    else if (/^A_DTS/.test(c)) a.codec = 'dts';
+                    else if (c === 'A_TRUEHD') a.codec = 'truehd';
+                    else if (c === 'A_MPEG/L3') a.codec = 'mp3';
+                    else if (c === 'A_MPEG/L2' || c === 'A_MPEG/L1') a.codec = 'mp2';
+                    else if (c === 'A_OPUS') a.codec = 'opus';
+                    else if (c === 'A_VORBIS') a.codec = 'vorbis';
+                    else if (c === 'A_FLAC') a.codec = 'flac';
+                    else if (/^A_PCM/.test(c)) a.codec = 'pcm';
+                    if (!a.channels && t.channels) a.channels = t.channels;
+                    out.audio.push(a);
+                } else if (t.type === 17) out.text++;
+            }
+            return (out.video || out.audio.length) ? out : { container: 'mkv', unknown: true };
+        }
+        // AVCDecoderConfigurationRecord: profile, level.
+        function avcConfig(p) {
+            if (!p || p.length < 4 || p[0] !== 1) return {};
+            const profile = p[1];
+            return { profile, level: p[3] / 10, bits: [110, 122, 244].includes(profile) ? 10 : 8 };
+        }
+        // HEVCDecoderConfigurationRecord: profile (2 = Main 10), level (×30).
+        function hevcConfig(p) {
+            if (!p || p.length < 13) return {};
+            const profile = p[1] & 0x1f;
+            return { profile, level: p[12] / 30, bits: profile === 2 ? 10 : 8 };
+        }
+        // AudioSpecificConfig: object type, channel configuration, HE (SBR).
+        function aacConfig(p) {
+            if (!p || p.length < 2) return {};
+            const aot = p[0] >> 3;
+            const ch = (p[1] >> 3) & 15;
+            const sync = p.length >= 5 && ((p[2] << 3) | (p[3] >> 5)) === 0x2b7 && [5, 29].includes(p[3] & 31) && (p[4] >> 7) === 1;
+            const channels = ch === 7 ? 8 : ch;   // configuration 7 = 7.1
+            return { channels, he: aot === 5 || aot === 29 || sync };
+        }
+        // BITMAPINFOHEADER inside Matroska's V_MS/VFW/FOURCC and AVI: the fourcc.
+        function vfwCodec(p) {
+            if (!p || p.length < 20) return 'other';
+            return fourccCodec(ascii(p, 16, 4));
+        }
+        function fourccCodec(cc) {
+            const f = (cc || '').toUpperCase();
+            if (['XVID', 'DIVX', 'DX50', 'DIV3', 'DIV4', 'FMP4', 'MP4V', 'M4S2', 'MP42', 'MP43'].includes(f)) return 'mpeg4';
+            if (['H264', 'AVC1', 'X264'].includes(f)) return 'h264';
+            if (['HEVC', 'H265', 'HVC1', 'HEV1'].includes(f)) return 'hevc';
+            if (['MPG2', 'MPEG', 'MPG1'].includes(f)) return 'mpeg2';
+            if (['WVC1', 'WMV3', 'WMV2', 'WMV1'].includes(f)) return 'vc1';
+            return 'other';
+        }
+
+        // ── MP4 / MOV ──
+        function mp4Boxes(b, p, end, fn) {
+            while (p + 8 <= end) {
+                let size = u32(b, p);
+                const type = ascii(b, p + 4, 4);
+                let hdr = 8;
+                if (size === 1) { if (p + 16 > end) return; size = u32(b, p + 8) * 4294967296 + u32(b, p + 12); hdr = 16; }
+                if (size === 0) size = end - p;
+                if (size < hdr) return;
+                if (fn(type, p + hdr, Math.min(p + size, end), p, size) === false) return;
+                p += size;
+            }
+        }
+        function mp4IndexDone(b) {
+            let done = false;
+            mp4Boxes(b, 0, b.length, (type, body, end, at, size) => {
+                if (type === 'moov') { done = at + size <= b.length; return false; }
+                if (type === 'mdat') { done = true; return false; }   // index at the end: nothing more to read
+                return true;
+            });
+            return done;
+        }
+        function parseMp4(b) {
+            let moov = null, mdatFirst = false;
+            mp4Boxes(b, 0, b.length, (type, body, end) => {
+                if (type === 'moov') { moov = [body, end]; return false; }
+                if (type === 'mdat') { mdatFirst = true; return false; }
+                return true;
+            });
+            if (!moov) return { container: 'mp4', unknown: true, indexAtEnd: mdatFirst };
+            const out = { container: 'mp4', video: null, audio: [], text: 0 };
+            const child = (p, end, name) => { let r = null; mp4Boxes(b, p, end, (t, cb, ce) => { if (t === name) { r = [cb, ce]; return false; } return true; }); return r; };
+            mp4Boxes(b, moov[0], moov[1], (type, tb, te) => {
+                if (type !== 'trak') return true;
+                const mdia = child(tb, te, 'mdia'); if (!mdia) return true;
+                const minf = child(mdia[0], mdia[1], 'minf'); if (!minf) return true;
+                const stbl = child(minf[0], minf[1], 'stbl'); if (!stbl) return true;
+                const stsd = child(stbl[0], stbl[1], 'stsd'); if (!stsd) return true;
+                mp4Boxes(b, stsd[0] + 8, stsd[1], (fmt, eb, ee) => {
+                    if (['avc1', 'avc3', 'hvc1', 'hev1', 'mp4v', 'av01', 'vp09', 'dvh1', 'dvhe'].includes(fmt)) {
+                        if (out.video) return false;
+                        const v = { codec: { avc1: 'h264', avc3: 'h264', hvc1: 'hevc', hev1: 'hevc', dvh1: 'hevc', dvhe: 'hevc', mp4v: 'mpeg4', av01: 'av1', vp09: 'vp9' }[fmt], w: u16(b, eb + 24), h: u16(b, eb + 26) };
+                        mp4Boxes(b, eb + 78, ee, (ct, cb, ce) => {
+                            if (ct === 'avcC') Object.assign(v, avcConfig(b.subarray(cb, ce)));
+                            if (ct === 'hvcC') Object.assign(v, hevcConfig(b.subarray(cb, ce)));
+                            return true;
+                        });
+                        out.video = v;
+                    } else if (['mp4a', 'ac-3', 'ec-3', 'Opus', '.mp3', 'dtsc', 'dtsh', 'dtsl', 'fLaC', 'mlpa'].includes(fmt)) {
+                        const a = { codec: { mp4a: 'aac', 'ac-3': 'ac3', 'ec-3': 'eac3', Opus: 'opus', '.mp3': 'mp3', dtsc: 'dts', dtsh: 'dts', dtsl: 'dts', fLaC: 'flac', mlpa: 'truehd' }[fmt], channels: u16(b, eb + 16), isDefault: true };
+                        // QuickTime sound descriptions v1/v2 are longer before their boxes.
+                        const soundVersion = u16(b, eb + 8);
+                        const boxesAt = eb + (soundVersion === 1 ? 44 : soundVersion === 2 ? 64 : 28);
+                        if (fmt === 'mp4a') {
+                            mp4Boxes(b, boxesAt, ee, (ct, cb, ce) => {
+                                if (ct !== 'esds') return true;
+                                const asc = esdsConfig(b.subarray(cb + 4, ce));
+                                if (asc) Object.assign(a, aacConfig(asc));
+                                else a.codec = 'mp3';      // MPEG-1 audio in mp4a (objectType 0x6B)
+                                return false;
+                            });
+                        }
+                        out.audio.push(a);
+                    } else if (['tx3g', 'wvtt', 'stpp', 'c608'].includes(fmt)) out.text++;
+                    return false;   // one sample description per track is enough
+                });
+                return true;
+            });
+            return (out.video || out.audio.length) ? out : { container: 'mp4', unknown: true };
+        }
+        // The AudioSpecificConfig inside an esds (descriptor 0x05), or null
+        // when the track isn't AAC (objectTypeIndication other than 0x40/0x66-0x68).
+        function esdsConfig(e) {
+            let i = 0;
+            const len = () => { let n = 0; for (let k = 0; k < 4 && i < e.length; k++) { const c = e[i++]; n = (n << 7) | (c & 0x7f); if (!(c & 0x80)) break; } return n; };
+            let oti = null;
+            while (i < e.length) {
+                const tag = e[i++]; const n = len();
+                if (tag === 0x03) { i += 2; const flags = e[i++]; if (flags & 0x80) i += 2; if (flags & 0x40) i += 1 + e[i]; if (flags & 0x20) i += 2; continue; }
+                if (tag === 0x04) { oti = e[i]; i += 13; continue; }
+                if (tag === 0x05) return (oti === null || [0x40, 0x66, 0x67, 0x68].includes(oti)) ? e.subarray(i, i + n) : null;
+                i += n;
+            }
+            return null;
+        }
+
+        // ── AVI ──
+        function parseAvi(b) {
+            const out = { container: 'avi', video: null, audio: [], text: 0 };
+            const s = ascii(b, 0, Math.min(b.length, 65536));
+            let at = s.indexOf('strh');
+            while (at >= 0 && at + 16 < b.length) {
+                const kind = ascii(b, at + 8, 4);
+                const strf = s.indexOf('strf', at + 8);
+                if (kind === 'vids' && !out.video) {
+                    const v = { codec: fourccCodec(ascii(b, at + 12, 4)), w: 0, h: 0 };
+                    if (strf > 0) { v.w = b[strf + 12] | (b[strf + 13] << 8); v.h = Math.abs((b[strf + 16] | (b[strf + 17] << 8))); const c2 = fourccCodec(ascii(b, strf + 24, 4)); if (c2 !== 'other') v.codec = c2; }
+                    out.video = v;
+                } else if (kind === 'auds' && strf > 0) {
+                    const tag = b[strf + 8] | (b[strf + 9] << 8);
+                    const codec = { 0x55: 'mp3', 0x50: 'mp2', 0x2000: 'ac3', 0x2001: 'dts', 0xFF: 'aac', 0x1610: 'aac', 0x1: 'pcm', 0x161: 'wma', 0x162: 'wma' }[tag] || 'other';
+                    out.audio.push({ codec, channels: b[strf + 10] | (b[strf + 11] << 8), isDefault: true });
+                }
+                at = s.indexOf('strh', at + 4);
+            }
+            return (out.video || out.audio.length) ? out : { container: 'avi', unknown: true };
+        }
+
+        // ── MPEG-TS ──
+        function parseTs(b) {
+            let pmt = null;
+            const out = { container: 'ts', video: null, audio: [], text: 0 };
+            for (let i = 0; i + 188 <= b.length; i += 188) {
+                if (b[i] !== 0x47) break;
+                const pid = ((b[i + 1] & 31) << 8) | b[i + 2];
+                if (!(b[i + 1] & 0x40)) continue;
+                let p = i + 4 + ((b[i + 3] & 0x20) ? 1 + b[i + 4] : 0);
+                p += 1 + b[p];
+                if (pid === 0 && pmt === null) { pmt = ((b[p + 10] & 31) << 8) | b[p + 11]; continue; }
+                if (pid !== pmt || pmt === null) continue;
+                const sectionLen = ((b[p + 1] & 15) << 8) | b[p + 2];
+                const infoLen = ((b[p + 10] & 15) << 8) | b[p + 11];
+                let q = p + 12 + infoLen;
+                const end = Math.min(p + 3 + sectionLen - 4, i + 188);
+                while (q + 5 <= end) {
+                    const st = b[q];
+                    const esLen = ((b[q + 3] & 15) << 8) | b[q + 4];
+                    const v = { 0x1B: 'h264', 0x24: 'hevc', 0x02: 'mpeg2', 0x01: 'mpeg2', 0x10: 'mpeg4' }[st];
+                    const a = { 0x0F: 'aac', 0x11: 'aac', 0x81: 'ac3', 0x87: 'eac3', 0x03: 'mp2', 0x04: 'mp2' }[st];
+                    if (v && !out.video) out.video = { codec: v, w: 0, h: 0 };
+                    if (a) out.audio.push({ codec: a, channels: 0, isDefault: true });
+                    q += 5 + esLen;
+                }
+                break;
+            }
+            return (out.video || out.audio.length) ? out : { container: 'ts', unknown: true };
+        }
+
+        function parseMediaHead(b) {
+            if (!b || b.length < 16) return null;
+            try {
+                if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return parseMatroska(b);
+                if (isMp4Start(b)) return parseMp4(b);
+                if (ascii(b, 0, 4) === 'RIFF' && ascii(b, 8, 3) === 'AVI') return parseAvi(b);
+                if (b[0] === 0x47 && b.length > 188 && b[188] === 0x47) return parseTs(b);
+            } catch (e) {
+                dbg('head', `parse: ${e.message || e}`, 'warn');
+            }
+            return { unknown: true };
+        }
+
+        // ━━━━━━ What this device can't play ━━━━━━
+        //
+        // Measured on a 2nd-gen Chromecast (16-nov): MKV and MP4 with H.264 up
+        // to level 4.1 and AAC stereo, MP3, AC-3, E-AC-3 and Opus 5.1 play;
+        // HEVC and Xvid play the sound over black; AAC 5.1 (LC or HE) fails
+        // right after the metadata (PIPELINE_ERROR_INITIALIZATION_FAILED).
+        const nativePlays = (mime) => {
+            try { return video.canPlayType(mime) !== ''; } catch (_) { return false; }
+        };
+        const channelsName = (n) => (n === 6 ? '5.1' : n === 8 ? '7.1' : n === 7 ? '6.1' : n > 0 ? `${n}ch` : '');
+        function videoName(v) {
+            const tenBit = (v.bits || 8) > 8 ? ', 10-bit' : '';
+            const uhd = (v.h > 1088 || v.w > 1920) ? ', 4K' : '';
+            switch (v.codec) {
+                case 'hevc': return `HEVC (H.265)${tenBit}${uhd}`;
+                case 'h264':
+                    if ((v.bits || 8) > 8) return `H.264 10-bit${uhd}`;
+                    if (v.level >= 4.2 && !uhd) return t('formatAvcHighLevel').replace('{level}', v.level.toFixed(1));
+                    return `H.264${v.level ? ` (level ${v.level.toFixed(1)})` : ''}${uhd}`;
+                case 'mpeg4': return 'MPEG-4 Part 2 (Xvid/DivX)';
+                case 'mpeg2': return 'MPEG-2';
+                case 'vc1': return 'VC-1 (WMV)';
+                case 'av1': return `AV1${tenBit}${uhd}`;
+                case 'vp9': return `VP9${uhd}`;
+                default: return v.id || v.codec || '?';
+            }
+        }
+        function audioName(a) {
+            const names = {
+                aac: a.he ? 'HE-AAC' : 'AAC', ac3: 'Dolby Digital (AC-3)', eac3: 'Dolby Digital Plus (E-AC-3)',
+                dts: 'DTS', truehd: 'Dolby TrueHD', mp2: 'MPEG audio layer II', wma: 'WMA', mp3: 'MP3',
+                opus: 'Opus', flac: 'FLAC', vorbis: 'Vorbis', pcm: 'PCM',
+            };
+            const ch = channelsName(a.channels);
+            return `${names[a.codec] || a.id || a.codec}${ch ? ` ${ch}` : ''}`;
+        }
+        // The sound the TV's player picks: the default track, else the first.
+        const mainAudio = (m) => (m.audio || []).find((a) => a.isDefault) || (m.audio || [])[0] || null;
+        // One line for the debug panel; never a URL.
+        function describeMedia(m) {
+            const a = mainAudio(m);
+            return [m.container, m.video ? videoName(m.video) : 'no video', a ? audioName(a) : 'no sound',
+                (m.audio || []).length > 1 ? `${m.audio.length} sounds` : ''].filter(Boolean).join(' · ');
+        }
+
+        // What in [m] this device can't play — { part, name, codec } — or
+        // null. [soundPlayed]: the sound was heard, so it isn't the culprit.
+        function formatProblem(m, { soundPlayed } = {}) {
+            const caps = probeCaps();
+            const v = m.video;
+            if (v) {
+                const maxLevel = parseFloat(caps.h264MaxLevel || '0');
+                let bad = false;
+                if (v.codec === 'hevc') bad = !caps.hevc && !nativePlays('video/mp4; codecs="hvc1.1.6.L93.B0"');
+                else if (v.codec === 'h264') {
+                    bad = (v.bits || 8) > 8 ||
+                        (maxLevel > 0 && v.level > maxLevel + 0.01) ||
+                        ((v.h > 1088 || v.w > 1920) && caps.uhd === false);
+                } else if (['mpeg4', 'mpeg2', 'vc1'].includes(v.codec)) bad = true;
+                else if (v.codec === 'av1') bad = !nativePlays('video/mp4; codecs="av01.0.05M.08"');
+                else if (v.codec === 'vp9') bad = !nativePlays('video/webm; codecs="vp9"');
+                if (bad) return { part: 'video', name: videoName(v), codec: v.codec };
+            }
+            if (soundPlayed) return null;
+            const a = mainAudio(m);
+            if (a) {
+                let bad = false;
+                if (a.codec === 'aac') bad = a.channels > 2 && caps.aacMulti !== true;
+                else if (a.codec === 'ac3') bad = !caps.ac3;
+                else if (a.codec === 'eac3') bad = !caps.eac3;
+                else if (['dts', 'truehd', 'wma', 'mp2'].includes(a.codec)) bad = true;
+                if (bad) return { part: 'audio', name: audioName(a), codec: a.codec };
+            }
+            return null;
+        }
+
+        // ━━━━━━ Episode queue ━━━━━━
+        //
+        // The app sends the episodes that follow the one it loaded
+        // ({type:'queue', forLoadId, items, autoAdvance}); the TV plays them
+        // itself, so the chain no longer stops when the phone sleeps (iOS
+        // suspends the app while it casts). As on the phone: around the
+        // credits (6% before the end, between 30 s and 3 min) a card counts
+        // down 8 s and the next episode starts, skipping the rest of the
+        // credits; at the very end it starts at once. Pausing or seeking back
+        // stops the count. The app can say {cmd:'next'} or {cmd:'cancel'}
+        // (that episode then plays to its end, and the chain stops).
+        // Each queued LOAD carries the app's own load id, so the app knows
+        // which episode the TV is on; what the TV finished is kept for an app
+        // that comes back later ({type:'queue', current, left, history}).
+        const QUEUE_MAX = 50;
+        const HISTORY_MAX = 30;
+        const CREDITS_FACTOR = 0.06;
+        let carriedQueue = null;      // the rest of the queue, for the episode on its way
+        const queueHistory = [];      // { loadId, pos, dur, finished }
+
+        const upnextEl = document.getElementById('upnext');
+        function showUpNext(item, left) {
+            if (!upnextEl) return;
+            const se = (item.season && item.episode) ? `S${item.season} · E${item.episode}` : (item.episode ? `E${item.episode}` : '');
+            document.getElementById('upnext-label').textContent = t('upNextLabel');
+            document.getElementById('upnext-title').textContent = [se, item.title].filter(Boolean).join(' — ');
+            document.getElementById('upnext-count').textContent = t('upNextIn').replace('{seconds}', String(left));
+            upnextEl.classList.remove('hidden');
+        }
+        function hideUpNext() {
+            if (upnextEl) upnextEl.classList.add('hidden');
+        }
+
+        function queueState() {
+            const s = session;
+            return {
+                type: 'queue', v: 1,
+                current: s ? s.loadId : null,
+                left: (s && s.queue) ? s.queue.items.map((i) => i.loadId) : [],
+                history: queueHistory.slice(),
+            };
+        }
+
+        function onQueueMessage(data) {
+            const s = session;
+            if (!s || !data.forLoadId || s.loadId !== data.forLoadId) {
+                dbg('queue', 'for another load: ignored', 'warn');
+                return;
+            }
+            if (data.cmd === 'next') {
+                if (s.queue && s.queue.items.length) advanceQueue(s, 'app');
+                return;
+            }
+            if (data.cmd === 'cancel') {
+                if (s.queue) {
+                    s.queue.cancelled = true;
+                    s.queue.shownLeft = 0;
+                    hideUpNext();
+                    setState(s, s.state, s.lastExtra);
+                }
+                return;
+            }
+            if (!Array.isArray(data.items)) return;
+            const items = data.items
+                .filter((i) => i && typeof i.loadId === 'string' && typeof i.url === 'string' && /^https?:\/\//i.test(i.url))
+                .slice(0, QUEUE_MAX);
+            s.queue = {
+                items,
+                autoAdvance: data.autoAdvance !== false,
+                countdownSec: Math.min(30, Math.max(3, Number(data.countdownSec) || 8)),
+                cancelled: false,
+                anchor: -1,
+                shownLeft: 0,
+            };
+            dbg('queue', `${items.length} episode(s) next`, 'ok');
+            setState(s, s.state, s.lastExtra);
+        }
+
+        video.addEventListener('timeupdate', () => {
+            const s = session;
+            if (s && s.queue && !s.isLive) checkUpNext(s);
+        });
+
+        function checkUpNext(s) {
+            const q = s.queue;
+            if (s.failed || q.cancelled || !q.autoAdvance || !q.items.length) return;
+            const dur = video.duration;
+            if (!isFinite(dur) || dur < 60) return;
+            const pos = video.currentTime;
+            const creditsAt = Math.min(180, Math.max(30, Math.round(dur * CREDITS_FACTOR)));
+            if (dur - pos > creditsAt) {
+                if (q.anchor >= 0) {
+                    q.anchor = -1;
+                    q.shownLeft = 0;
+                    hideUpNext();
+                    setState(s, s.state, s.lastExtra);
+                }
+                return;
+            }
+            if (q.anchor < 0) q.anchor = pos;
+            const left = Math.ceil(q.countdownSec - (pos - q.anchor));
+            if (left <= 0) {
+                advanceQueue(s, 'credits');
+                return;
+            }
+            if (left !== q.shownLeft) {
+                q.shownLeft = left;
+                showUpNext(q.items[0], left);
+                setState(s, s.state, s.lastExtra);
+            }
+        }
+
+        function advanceQueue(s, why) {
+            const q = s.queue;
+            if (session !== s || !q || !q.items.length) return;
+            const item = q.items[0];
+            queueHistory.push({
+                loadId: s.loadId,
+                pos: Math.floor(video.currentTime || 0),
+                dur: isFinite(video.duration) ? Math.floor(video.duration) : null,
+                finished: true,
+            });
+            while (queueHistory.length > HISTORY_MAX) queueHistory.shift();
+            carriedQueue = {
+                forLoadId: item.loadId,
+                items: q.items.slice(1),
+                autoAdvance: q.autoAdvance,
+                countdownSec: q.countdownSec,
+            };
+            q.items = [];
+            hideUpNext();
+            dbg('queue', `→ the next episode (${why}), ${carriedQueue.items.length} after it`, 'ok');
+            const req = queuedRequest(s, item);
+            pendingQueued = item.loadId;
+            const done = () => afterQueuedLoad(req, item);
+            try {
+                const p = playerManager.load(req);
+                if (p && p.then) p.then(done, done); else done();
+            } catch (e) {
+                dbg('queue', `load threw: ${(e && e.message) || e}`, 'err');
+                done();
+            }
+        }
+
+        function afterQueuedLoad(req, item) {
+            if (pendingQueued === item.loadId) {
+                // CAF loaded it without passing it through the interceptor.
+                pendingQueued = null;
+                dbg('queue', 'CAF loaded the episode itself: following it', 'warn');
+                handleLoad(req, true);
+            }
+            sendToApps(queueState());
+        }
+
+        // The next episode's LOAD, as the app would have sent it: its own
+        // load id, the same handshake, and the episode's details for the
+        // lock screen and Google Home.
+        function queuedRequest(s, item) {
+            const M = cast.framework.messages;
+            const req = new M.LoadRequestData();
+            const media = new M.MediaInformation();
+            media.contentId = item.url;
+            media.contentUrl = item.url;
+            media.contentType = item.contentType || 'video/mp4';
+            media.streamType = M.StreamType.BUFFERED;
+            if (item.duration > 0) media.duration = item.duration;
+            const md = new M.TvShowMediaMetadata();
+            md.title = item.title || '';
+            if (item.seriesTitle) md.seriesTitle = item.seriesTitle;
+            if (item.season) md.season = item.season;
+            if (item.episode) md.episode = item.episode;
+            if (item.imageUrl) md.images = [new M.Image(item.imageUrl)];
+            media.metadata = md;
+            req.media = media;
+            req.autoplay = true;
+            req.currentTime = item.start > 0 ? item.start : 0;
+            const base = s.custom || {};
+            req.customData = Object.assign({}, base, {
+                nipa: Object.assign({}, base.nipa || {}, { loadId: item.loadId }),
+            });
+            return req;
         }
 
         // ━━━━━━ HLS engine (hls.js via MSE) ━━━━━━
@@ -1434,7 +2370,13 @@
         });
         video.addEventListener('ended', () => {
             const s = session;
-            if (s && !s.failed) setState(s, 'ended');
+            if (!s || s.failed) return;
+            const q = s.queue;
+            if (q && q.items.length && q.autoAdvance && !q.cancelled) {
+                advanceQueue(s, 'ended');
+                return;
+            }
+            setState(s, 'ended');
         });
 
         // ━━━━━━ Watchdog (hls engine) ━━━━━━
@@ -1657,8 +2599,9 @@
                 if (liveTs) s.hlsUrl = tsToM3u8(url);
                 startHls(s);
             } else {
-                s.engine = 'native';
                 s.via = 'native';
+                s.request = lastRequest;
+                startNativeAttempt(s);
                 // For native, set the src directly — CAF isn't in the loop
                 // for retries so there's no risk of a duplicate load here.
                 video.src = url;

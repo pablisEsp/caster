@@ -37,5 +37,15 @@
  "undecodableSubtitle": "Olyan formában sugározzák, amelyet a tévé lejátszója nem tud olvasni (gyakori a váltottsoros, 1080i-s csatornáknál). Nézd meg a telefonodon.",
  "stalledTitle": "Lefagyott a kép",
  "stalledSubtitle": "A lejátszás nem tudott magától helyreállni. Nyomd meg az „Újra” gombot, vagy nézd meg a telefonodon.",
- "retry": "Újra"
+ "retry": "Újra",
+ "vodCodecTitle": "Ez a tévé nem tudja lejátszani ezt a videót",
+ "vodCodecSubtitle": "A formátuma több, mint amit ez a tévé vagy Chromecast kezelni tud. Nézd meg a telefonodon.",
+ "vodVideoSubtitle": "A képe {format} formátumú, amit ez a tévé vagy Chromecast nem tud dekódolni. Nézd meg a telefonodon.",
+ "vodAudioSubtitle": "A hangja {format} formátumú, amit ez a tévé vagy Chromecast nem tud lejátszani. Nézd meg a telefonodon.",
+ "notVideoTitle": "A szolgáltatód egy oldalt küldött a videó helyett",
+ "notVideoSubtitle": "Lehet, hogy lejárt az előfizetésed, vagy a szolgáltatódnál gond van. Ellenőrizd, hogy lejátszható-e a telefonodon.",
+ "slowTitle": "A szokásosnál tovább tart…",
+ "slowDetail": "Egyes fájlok elindulása eltart egy ideig ezen a tévén. Magától el fog indulni.",
+ "upNextLabel": "Következő epizód",
+ "upNextIn": "Indulás {seconds} mp múlva"
 }
